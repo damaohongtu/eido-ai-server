@@ -1,0 +1,29 @@
+services:
+  eido:
+    image: eido-server-litellm:latest
+    container_name: eido-server
+    restart: unless-stopped
+    ports:
+      - "${EIDO_PORT:-8000}:8000"
+      - "${LITELLM_PORT:-4000}:4000"
+    environment:
+      - ANTHROPIC_BASE_URL=http://127.0.0.1:4000
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-deepseek-chat}
+      - ANTHROPIC_SMALL_FAST_MODEL=${ANTHROPIC_SMALL_FAST_MODEL:-}
+      - API_TIMEOUT_MS=${API_TIMEOUT_MS:-300000}
+      - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-0}
+      - AGENT_HARNESS=${AGENT_HARNESS:-claude_code}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:?required}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-litellm-proxy}
+    volumes:
+      - ${SKILLS_DIR:-./.claude/skills}:/workspace/.claude/skills:ro
+      - ${LOG_DIR:-./logs}:/var/log/eido
+      - ${LITELLM_CONFIG:-./docker/litellm-config.yaml}:/etc/litellm/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
