@@ -13,13 +13,11 @@ services:
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-deepseek-chat}
       - ANTHROPIC_SMALL_FAST_MODEL=${ANTHROPIC_SMALL_FAST_MODEL:-}
       - API_TIMEOUT_MS=${API_TIMEOUT_MS:-300000}
-      - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-0}
       - AGENT_HARNESS=${AGENT_HARNESS:-claude_code}
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:?required}
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-litellm-proxy}
     volumes:
       - ${SKILLS_DIR:-./.claude/skills}:/workspace/.claude/skills:ro
       - ${LOG_DIR:-./logs}:/var/log/eido
+      - ${EIDO_DATA_DIR:-./.eido}:/workspace/.eido
       - ${LITELLM_CONFIG:-./docker/litellm-config.yaml}:/etc/litellm/config.yaml:ro
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]

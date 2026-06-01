@@ -3,14 +3,7 @@ model_list:
     litellm_params:
       model: deepseek/deepseek-chat
       api_base: https://api.deepseek.com/v1
-      api_key: os.environ/DEEPSEEK_API_KEY
+      api_key: sk_xxxxx
       max_tokens: 8192
       max_completion_tokens: 8192
       drop_params: true
-
-litellm_settings:
-  drop_params: true
-  set_verbose: false
-
-general_settings:
-  master_key: os.environ/LITELLM_MASTER_KEY

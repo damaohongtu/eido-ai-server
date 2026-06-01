@@ -30,10 +30,9 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY backend/ .
 
-COPY docker/litellm-config.yaml /etc/litellm/config.yaml
 COPY docker/supervisord-litellm.conf /etc/supervisor/conf.d/supervisord.conf
 
-RUN mkdir -p /workspace/.claude/skills /var/log/eido /var/log/eido/litellm
+RUN mkdir -p /etc/litellm /workspace/.claude/skills /var/log/eido /var/log/eido/litellm
 
 ENV WORKSPACE_ROOT=/workspace
 ENV SKILLS_DIR=/workspace/.claude/skills
