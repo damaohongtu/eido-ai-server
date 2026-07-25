@@ -52,7 +52,7 @@ async def get_session_detail(session_id: str):
     try:
         validate_session_id(session_id)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     mgr = get_session_workspace_manager()
     sess_dir = mgr.session_root(session_id, create=False)
     if not sess_dir.exists():
@@ -65,8 +65,20 @@ async def delete_session(session_id: str):
     try:
         validate_session_id(session_id)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     mgr = get_session_workspace_manager()
+    try:
+        from app.services.claude_skill_service import get_claude_skill_service
+        from app.services.open_code_service import get_open_code_service
+
+        claude_service = get_claude_skill_service()
+        if claude_service is not None:
+            claude_service.reset_session(session_id)
+        open_code_service = get_open_code_service()
+        if open_code_service is not None:
+            open_code_service.reset_session(session_id)
+    except Exception:
+        logger.exception("删除会话前回收 agent 状态失败: session=%s", session_id)
     removed = mgr.remove(session_id)
     if not removed:
         raise HTTPException(status_code=404, detail="会话不存在")

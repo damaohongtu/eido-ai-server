@@ -14,11 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code --registry https://registry.npmmirror.com
+RUN npm install -g @anthropic-ai/claude-code@2.1.218 opencode-ai --registry https://registry.npmmirror.com
 
 RUN fc-cache -fv
 
@@ -37,6 +37,8 @@ RUN mkdir -p /workspace/.claude/skills /var/log/eido
 ENV WORKSPACE_ROOT=/workspace
 ENV SKILLS_DIR=/workspace/.claude/skills
 ENV LOG_DIR=/var/log/eido
+ENV EIDO_DATA_ROOT=/workspace/.eido
+ENV XDG_DATA_HOME=/workspace/.eido/opencode-data
 
 EXPOSE 8000
 

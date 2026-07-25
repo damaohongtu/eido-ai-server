@@ -1,17 +1,119 @@
+"""OpenHarness 执行层封装。
+
+基于 HKUDS/OpenHarness（https://github.com/HKUDS/OpenHarness，PyPI: openharness-ai）。
+当 AGENT_HARNESS=open_harness 时，通过 QueryEngine 驱动 Agent 执行。
+"""
+
 import asyncio
 import json
 import logging
 import os
+import time
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import AsyncGenerator, Dict, List, Optional
+from typing import AsyncGenerator, Dict, List, MutableMapping, Optional
 
 from app.services.claude_skill_service import (
-    HEARTBEAT_INTERVAL_SEC,
     _HEARTBEAT_FRAME,
+    HEARTBEAT_INTERVAL_SEC,
     extract_latest_user_text,
 )
 
 logger = logging.getLogger(__name__)
+
+OPEN_HARNESS_LOG_CHUNK_CHARS = 4000
+
+
+def _serialize_log_value(value: object) -> str:
+    """Serialize an OpenHarness value without shortening its content."""
+    try:
+        if is_dataclass(value) and not isinstance(value, type):
+            value = asdict(value)
+        elif hasattr(value, "model_dump"):
+            value = value.model_dump()  # type: ignore[union-attr]
+        elif hasattr(value, "__dict__"):
+            value = vars(value)
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    except (TypeError, ValueError, RecursionError):
+        return repr(value)
+
+
+def _log_complete_value(
+    event_name: str, value: object, level: int = logging.INFO
+) -> None:
+    """Write the complete value in ordered chunks so log collectors do not cut it."""
+    content = _serialize_log_value(value)
+    encoded = content.replace("\r", "\\r").replace("\n", "\\n")
+    chunks = [
+        encoded[offset : offset + OPEN_HARNESS_LOG_CHUNK_CHARS]
+        for offset in range(0, len(encoded), OPEN_HARNESS_LOG_CHUNK_CHARS)
+    ] or [""]
+    for index, chunk in enumerate(chunks, start=1):
+        logger.log(
+            level,
+            "  [OpenHarness/%s chunk=%d/%d chars=%d] %s",
+            event_name,
+            index,
+            len(chunks),
+            len(content),
+            chunk,
+        )
+
+
+def _log_event(
+    event: object, state: Optional[MutableMapping[str, object]] = None
+) -> None:
+    """Log every semantic OpenHarness stream event at INFO or above."""
+    try:
+        from openharness.engine.stream_events import (
+            AssistantTextDelta,
+            AssistantTurnComplete,
+            ErrorEvent,
+            StatusEvent,
+            ToolExecutionCompleted,
+            ToolExecutionStarted,
+        )
+    except ImportError:
+        _log_complete_value(type(event).__name__, event)
+        return
+
+    event_name = type(event).__name__
+    if state is not None:
+        counts = state.setdefault("event_counts", {})
+        if isinstance(counts, dict):
+            counts[event_name] = int(counts.get(event_name, 0)) + 1
+
+    if isinstance(event, AssistantTextDelta):
+        text = event.text or ""
+        if state is not None:
+            state["assistant_chars"] = int(state.get("assistant_chars", 0)) + len(text)
+        _log_complete_value("Assistant/TextDelta", text)
+    elif isinstance(event, ToolExecutionStarted):
+        if state is not None:
+            state["tool_calls"] = int(state.get("tool_calls", 0)) + 1
+        logger.info("  [OpenHarness/Tool/Call] %s", event.tool_name)
+        _log_complete_value(f"Tool/Input:{event.tool_name}", event.tool_input)
+    elif isinstance(event, ToolExecutionCompleted):
+        status = "ERROR" if event.is_error else "OK"
+        logger.info("  [OpenHarness/Tool/Result:%s] %s", status, event.tool_name)
+        _log_complete_value(
+            f"Tool/Output:{event.tool_name}",
+            event.output or "",
+            logging.ERROR if event.is_error else logging.INFO,
+        )
+    elif isinstance(event, ErrorEvent):
+        _log_complete_value("Error", event, logging.ERROR)
+    elif isinstance(event, StatusEvent):
+        _log_complete_value("Status", event.message or "")
+    elif isinstance(event, AssistantTurnComplete):
+        usage = event.usage
+        if state is not None:
+            state["input_tokens"] = int(getattr(usage, "input_tokens", 0) or 0)
+            state["output_tokens"] = int(getattr(usage, "output_tokens", 0) or 0)
+        _log_complete_value("Assistant/TurnComplete", event)
+    else:
+        _log_complete_value(event_name, event)
+
 
 SYSTEM_PROMPT = (
     "You are an AI coding assistant. Use the available tools to help the user "
@@ -52,9 +154,20 @@ class OpenHarnessService:
         self._engines: Dict[str, object] = {}
 
     async def execute_stream(
-        self, messages: list, context: Optional[str] = None,
-        *, session_id: Optional[str] = None,
+        self,
+        messages: list,
+        context: Optional[str] = None,
+        *,
+        session_id: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
+        run_started = time.perf_counter()
+        run_state: MutableMapping[str, object] = {
+            "event_counts": {},
+            "assistant_chars": 0,
+            "tool_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
         logger.info(
             f"▶ OH execute_stream | msgs={len(messages)}"
             + (f" | session={session_id}" if session_id else "")
@@ -67,6 +180,7 @@ class OpenHarnessService:
         cwd = self.workspace_root
         if session_id:
             from app.services.session_workspace import get_session_workspace_manager
+
             try:
                 cwd = get_session_workspace_manager().session_root(session_id)
             except ValueError as e:
@@ -83,6 +197,7 @@ class OpenHarnessService:
         if context and context.strip():
             text = f"{text}\n\n---\n## 上一步执行结果（供参考）\n\n{context.strip()[:4000]}"
 
+        engine_reused = (session_id or "_") in self._engines
         try:
             engine = self._get_engine(session_id or "_", cwd)
         except Exception as e:
@@ -91,9 +206,18 @@ class OpenHarnessService:
             yield "data: [DONE]\n\n"
             return
 
+        logger.info(
+            "  [OpenHarness/Run] engine_reused=%s prompt_chars=%d cwd=%s model=%s",
+            engine_reused,
+            len(text),
+            cwd,
+            _resolve_model(),
+        )
+
         async def stream_events():
             try:
                 async for event in engine.submit_message(text):  # type: ignore[union-attr]
+                    _log_event(event, run_state)
                     for sse in _convert_event(event):
                         yield sse
             except Exception as e:
@@ -131,12 +255,24 @@ class OpenHarnessService:
                 ev = await queue.get()
                 if ev is _DONE:
                     break
-                if isinstance(ev, str) and '"type":"error"' in ev:
+                if isinstance(ev, str) and (
+                    '"type":"error"' in ev or '"type": "error"' in ev
+                ):
                     had_error = True
                 yield ev
             if not had_error:
                 yield _sse({"type": "workflow_complete", "data": {"references": []}})
-            logger.info("◀ OH execute_stream 完成")
+            logger.info(
+                "◀ OH execute_stream 完成 | status=%s elapsed_ms=%.1f events=%s "
+                "tools=%d assistant_chars=%d input_tokens=%d output_tokens=%d",
+                "error" if had_error else "ok",
+                (time.perf_counter() - run_started) * 1000,
+                _serialize_log_value(run_state["event_counts"]),
+                run_state["tool_calls"],
+                run_state["assistant_chars"],
+                run_state["input_tokens"],
+                run_state["output_tokens"],
+            )
         finally:
             ht.cancel()
             if not pt.done():
@@ -167,9 +303,11 @@ class OpenHarnessService:
         api_client = _create_api_client()
         tool_registry = create_default_tool_registry()
 
-        perm = PermissionChecker(PermissionSettings(
-            mode=PermissionMode.FULL_AUTO,
-        ))
+        perm = PermissionChecker(
+            PermissionSettings(
+                mode=PermissionMode.FULL_AUTO,
+            )
+        )
 
         extra_skill_dirs = [str(self.skills_dir)]
 
@@ -256,7 +394,14 @@ def _convert_event(event: object) -> List[str]:
     elif isinstance(event, ToolExecutionCompleted):
         preview = (event.output or "")[:200].strip()
         status = "✗ 工具出错" if event.is_error else "✓ 工具完成"
-        out.append(_sse({"type": "thinking", "content": f"{status}: {preview}" if preview else status}))
+        out.append(
+            _sse(
+                {
+                    "type": "thinking",
+                    "content": f"{status}: {preview}" if preview else status,
+                }
+            )
+        )
 
     elif isinstance(event, ErrorEvent):
         out.append(_sse({"type": "error", "message": event.message}))
@@ -267,7 +412,14 @@ def _convert_event(event: object) -> List[str]:
 
     elif isinstance(event, AssistantTurnComplete):
         u = event.usage
-        out.append(_sse({"type": "thinking", "content": f"执行完成 | 输入: {u.input_tokens} tokens | 输出: {u.output_tokens} tokens"}))
+        out.append(
+            _sse(
+                {
+                    "type": "thinking",
+                    "content": f"执行完成 | 输入: {u.input_tokens} tokens | 输出: {u.output_tokens} tokens",
+                }
+            )
+        )
 
     return out
 
