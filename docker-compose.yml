@@ -12,7 +12,11 @@ services:
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}
       - ANTHROPIC_SMALL_FAST_MODEL=${ANTHROPIC_SMALL_FAST_MODEL:-}
       - API_TIMEOUT_MS=${API_TIMEOUT_MS:-300000}
+      - EIDO_DATA_ROOT=/workspace/.eido
       - AGENT_HARNESS=${AGENT_HARNESS:-claude_code}
+      - OPENCODE_MODEL=${OPENCODE_MODEL:-}
+      - OPENCODE_CONFIG=${OPENCODE_CONFIG:-}
+      - OPENCODE_CONFIG_CONTENT=${OPENCODE_CONFIG_CONTENT:-}
     volumes:
       - ${SKILLS_DIR:-./.claude/skills}:/workspace/.claude/skills:ro
       - ${LOG_DIR:-./logs}:/var/log/eido

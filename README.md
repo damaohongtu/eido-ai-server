@@ -13,7 +13,7 @@ docker build -f Dockerfile -t eido-server:latest .
 ### 2. 准备目录与环境变量
 
 ```bash
-mkdir -p .claude/skills logs .eido/workspaces
+mkdir -p .claude/skills logs .eido/workspaces .eido/opencode-data
 
 # 必填：Anthropic 兼容 API（直连或自建代理）
 export ANTHROPIC_BASE_URL=https://api.anthropic.com
@@ -23,6 +23,8 @@ export ANTHROPIC_API_KEY=your-api-key
 
 export ANTHROPIC_MODEL=claude-sonnet-4-6
 export AGENT_HARNESS=claude_code
+# 可选：AGENT_HARNESS=opencode 时指定 provider/model
+# export OPENCODE_MODEL=anthropic/claude-sonnet-4-6
 
 # 可选
 export EIDO_PORT=8000
@@ -61,7 +63,11 @@ services:
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}
       - ANTHROPIC_SMALL_FAST_MODEL=${ANTHROPIC_SMALL_FAST_MODEL:-}
       - API_TIMEOUT_MS=${API_TIMEOUT_MS:-300000}
+      - EIDO_DATA_ROOT=/workspace/.eido
       - AGENT_HARNESS=${AGENT_HARNESS:-claude_code}
+      - OPENCODE_MODEL=${OPENCODE_MODEL:-}
+      - OPENCODE_CONFIG=${OPENCODE_CONFIG:-}
+      - OPENCODE_CONFIG_CONTENT=${OPENCODE_CONFIG_CONTENT:-}
     volumes:
       - ${SKILLS_DIR:-./.claude/skills}:/workspace/.claude/skills:ro
       - ${LOG_DIR:-./logs}:/var/log/eido
@@ -79,7 +85,7 @@ services:
 | 宿主机路径 | 容器路径 | 用途 |
 |-----------|----------|------|
 | `./logs` | `/var/log/eido` | 应用日志 |
-| `./.eido` | `/workspace/.eido` | 会话 DB、工作区（`workspaces/<session_id>/uploads|outputs`） |
+| `./.eido` | `/workspace/.eido` | 会话工作区及持久化 OpenCode 凭据/数据 |
 | `./.claude/skills` | `/workspace/.claude/skills` | 技能定义（只读） |
 
 ---
@@ -165,6 +171,59 @@ curl -N -X POST http://localhost:8000/api/v1/chat/chat \
 ```
 
 响应为 SSE（`text/event-stream`），每行形如 `data: {"type":"content",...}`，结束为 `data: [DONE]`。
+
+`harness` 支持 `claude_code`、`open_harness`、`opencode`。不传时使用
+`AGENT_HARNESS`。同一 `session_id` 会复用 Claude Code 子进程或续接 OpenCode
+原生会话；删除 session 时会同步回收对应执行状态。
+
+每个 HTTP 响应都会返回 `X-Trace-Id`。也可以由调用方传入合法的
+`X-Trace-Id` 以串联上游请求；应用日志统一包含 `traceId` 与 `sessionId`，
+Claude/OpenCode 的原始执行输出会完整记录（超长 OpenCode 输出按有序日志块拆分，
+不会丢失尾部内容）。
+
+### Agent 运行时版本与效率
+
+- Claude Code CLI：`2.1.218`（Docker 固定版本，Node.js 22）。
+- Claude Agent SDK：`0.2.126`。
+- 同一 session 使用长生命周期 `ClaudeSDKClient`，避免每轮重启 Claude Code。
+- session 技能映射到原生 `.claude/skills/`，由 `Skill` 工具按需加载。
+- 关闭未消费的 partial-message 流，并缓存技能目录扫描结果。
+- OpenCode CLI 随镜像安装；可通过 `OPENCODE_MODEL=provider/model` 选择模型。
+
+### OpenCode 快速使用
+
+本机先完成 Provider 认证并选择模型：
+
+```bash
+opencode auth login
+opencode auth list
+opencode models
+
+export AGENT_HARNESS=opencode
+export OPENCODE_MODEL=zai/glm-5.1
+```
+
+请求中可以显式指定：
+
+```json
+{
+  "session_id": "a1b2c3d4e5f6",
+  "messages": [
+    {"role": "user", "content": "分析 uploads 中的文件，将报告写到 outputs/report.html"}
+  ],
+  "harness": "opencode"
+}
+```
+
+Docker 可使用持久化到 `.eido/opencode-data` 的交互式认证：
+
+```bash
+docker compose run --rm eido opencode auth login
+docker compose run --rm eido opencode auth list
+```
+
+完整配置、Docker/本机认证、会话续接、文件处理、日志和故障排查见
+[OpenCode 使用指南](docs/opencode.md)。
 
 ### 列出会话工作区文件
 
