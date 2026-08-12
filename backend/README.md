@@ -15,7 +15,6 @@ backend/
 │   │   └── endpoints/
 │   │       ├── chat.py             # POST /chat/chat — 对话与技能执行
 │   │       ├── skills.py           # GET  /skills/   — 技能列表与详情
-│   │       ├── mcp.py              # MCP 工具注册相关
 │   │       └── workflow.py         # 健康检查
 │   ├── core/
 │   │   └── config.py               # Pydantic Settings（读取 .env）
@@ -24,8 +23,7 @@ backend/
 │   └── services/
 │       ├── claude_skill_service.py # Claude SDK 长连接、原生 Skills 与 SSE
 │       ├── open_code_service.py    # OpenCode CLI、原生会话续接与 SSE
-│       ├── llm_service.py          # DeepSeek 普通对话
-│       └── mcp_registry.py         # MCP 工具注册表
+│       └── session_workspace.py    # 单次会话工作区隔离
 ├── alembic/                        # 数据库迁移（保留备用）
 ├── scripts/                        # 辅助脚本
 ├── requirements.txt
@@ -64,7 +62,8 @@ python run.py
 |------|------|--------|
 | `ANTHROPIC_API_KEY` | Claude Agent SDK API Key | 必填* |
 | `ANTHROPIC_MODEL` | Claude 模型 | provider 默认值 |
-| `AGENT_HARNESS` | `claude_code` / `open_harness` / `opencode` | `claude_code` |
+| `AGENT_HARNESS` | `claude_code` / `opencode` | `claude_code` |
+| `MCP_CONFIG_PATH` | 统一 MCP JSON 文件路径 | `{workspace}/mcp.json` |
 | `OPENCODE_MODEL` | OpenCode 可选模型，格式 `provider/model` | OpenCode 默认值 |
 | `OPENCODE_CONFIG` | OpenCode JSON/JSONC 配置文件绝对路径 | 空 |
 | `OPENCODE_CONFIG_CONTENT` | OpenCode JSON 配置；Docker 中可用于 provider 认证 | 空 |
@@ -92,7 +91,7 @@ python run.py
 }
 ```
 
-`harness` 可选 `claude_code`、`open_harness`、`opencode`；不传时使用
+`harness` 可选 `claude_code`、`opencode`；不传时使用
 `AGENT_HARNESS`。响应固定为 SSE 流。
 
 响应为 SSE 流，事件类型：
@@ -130,3 +129,11 @@ session，只发送最新用户请求。SDK、工具和 OpenCode 原始输出均
 - 原始 NDJSON、推理、正文、工具输入/输出和执行汇总均完整写入日志。
 
 完整操作步骤及排障说明见 [OpenCode 使用指南](../docs/opencode.md)。
+
+## MCP 配置
+
+Claude Code 和 OpenCode 共用 `MCP_CONFIG_PATH` 指向的标准
+`{"mcpServers": {...}}` JSON。每轮执行前重新读取；Claude 客户端池会在配置修订
+变化时重建，OpenCode 则将配置转换为其原生 `mcp` 节点。
+
+完整说明见 [MCP 使用指南](../docs/mcp.md)。

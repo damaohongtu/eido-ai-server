@@ -80,19 +80,26 @@ async def lifespan(app: FastAPI):
     workspace_root = Path(settings.WORKSPACE_ROOT)
 
     try:
+        from app.core.mcp_config import load_mcp_config
+
+        mcp_config = load_mcp_config(
+            settings.MCP_CONFIG_PATH,
+            environment={**settings.claude_agent_env},
+        )
+        logger.info(
+            "✓ MCP 配置已加载: path=%s servers=%s",
+            mcp_config.path,
+            ",".join(mcp_config.server_names) or "(none)",
+        )
+    except ValueError as e:
+        logger.error("✗ MCP 配置加载失败: %s", e)
+
+    try:
         svc = init_claude_skill_service(skills_dir, workspace_root)
         skill_count = len(svc.scan_skills())
         logger.info(f"✓ ClaudeSkillService 初始化完成: 发现 {skill_count} 个技能")
     except Exception as e:
         logger.error(f"✗ ClaudeSkillService 初始化失败: {e}", exc_info=True)
-
-    try:
-        from app.services.open_harness_service import init_open_harness_service
-
-        init_open_harness_service(skills_dir, workspace_root)
-        logger.info("✓ OpenHarnessService 初始化完成")
-    except Exception as e:
-        logger.error(f"✗ OpenHarnessService 初始化失败: {e}", exc_info=True)
 
     try:
         from app.services.open_code_service import init_open_code_service

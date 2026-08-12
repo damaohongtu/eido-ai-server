@@ -253,6 +253,10 @@ curl -s -X DELETE \
 | `EIDO_DATA_ROOT` | Eido 数据根目录，同时决定隔离的 OpenCode 数据目录 | Docker 固定为 `/workspace/.eido` |
 | `LOG_LEVEL` | 控制控制台日志级别 | 默认 `INFO` 已包含完整执行过程 |
 
+OpenCode 的 MCP Server 不写在 `OPENCODE_CONFIG_CONTENT` 中，而是统一配置在
+`MCP_CONFIG_PATH` 指向的 `mcp.json`；Eido 会自动转换并合并。详见
+[MCP 使用指南](mcp.md)。
+
 模型选择顺序在本服务中是：
 
 1. `OPENCODE_MODEL` 非空时，Eido 将其作为 `opencode run --model` 传入，优先级最高。

@@ -1,0 +1,30 @@
+{
+  "mcpServers": {
+    "comein-search": {
+      "type": "sse",
+      "url": "http://127.0.0.1:17777/comein-mcp/sse",
+      "headers": {
+        "x-mesh-auth": "123456"
+      },
+      "disabled": false
+    },
+    "mao-mcp": {
+      "type": "sse",
+      "url": "http://127.0.0.1:16666/ia-mcp-proxy/mao-mcp/sse",
+      "headers": {
+        "x-mesh-auth": "123456"
+      },
+      "disabled": false
+    },
+    "aidata-assistant-srv-tool": {
+      "type": "sse",
+      "url": "http://127.0.0.1:17777/aidata-assistant-srv-tool/sse",
+      "disabled": false
+    },
+    "aidata-assistant-srv-data": {
+      "type": "sse",
+      "url": "http://127.0.0.1:17777/aidata-assistant-srv-data/sse",
+      "disabled": false
+    }
+  }
+}

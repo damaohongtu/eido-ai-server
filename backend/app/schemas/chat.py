@@ -17,5 +17,5 @@ class ChatRequest(BaseModel):
     session_id: str = Field(..., description="会话 ID")
     harness: Optional[str] = Field(
         None,
-        description="claude_code | open_harness | opencode，不传使用 AGENT_HARNESS",
+        description="claude_code | opencode，不传使用 AGENT_HARNESS",
     )

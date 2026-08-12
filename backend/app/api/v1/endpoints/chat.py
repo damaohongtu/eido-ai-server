@@ -93,11 +93,7 @@ async def chat_completion(request: ChatRequest, raw_request: Request):
             request.harness or ""
         ).strip().lower() or settings.AGENT_HARNESS.strip().lower()
 
-        if harness_type == "open_harness":
-            from app.services.open_harness_service import get_open_harness_service
-
-            svc = get_open_harness_service()
-        elif harness_type == "opencode":
+        if harness_type == "opencode":
             from app.services.open_code_service import get_open_code_service
 
             svc = get_open_code_service()
@@ -110,7 +106,7 @@ async def chat_completion(request: ChatRequest, raw_request: Request):
                 status_code=400,
                 detail=(
                     f"不支持的 AI 后端: {harness_type}"
-                    "（可选: claude_code, open_harness, opencode）"
+                    "（可选: claude_code, opencode）"
                 ),
             )
 

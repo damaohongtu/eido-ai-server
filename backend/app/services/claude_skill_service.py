@@ -583,9 +583,33 @@ class ClaudeSkillService:
             yield self._sse({"type": "error", "message": auth_error})
             yield "data: [DONE]\n\n"
             return
+        from app.core.config import settings
+        from app.core.mcp_config import load_mcp_config
+
+        # MCP values may reference variables loaded from backend/.env. Resolve
+        # them before logging any provider summary; resolved secrets are never logged.
+        mcp_environment = {**os.environ, **agent_env}
+        try:
+            mcp_config = load_mcp_config(
+                settings.MCP_CONFIG_PATH, environment=mcp_environment
+            )
+        except ValueError as exc:
+            logger.error("Claude MCP 配置加载失败: %s", exc)
+            yield self._sse({"type": "error", "message": f"MCP 配置错误: {exc}"})
+            yield "data: [DONE]\n\n"
+            return
         auth_mode, provider = self._agent_auth_summary(agent_env)
         logger.info("  [ClaudeAuth] mode=%s provider=%s", auth_mode, provider)
-        client_signature = (str(cwd.resolve()), skill_revision)
+        logger.info(
+            "  [ClaudeMCP] path=%s servers=%s",
+            mcp_config.path,
+            ",".join(mcp_config.server_names) or "(none)",
+        )
+        client_signature = (
+            str(cwd.resolve()),
+            skill_revision,
+            mcp_config.revision,
+        )
 
         async def _run_once(resume_sid: Optional[str]) -> AsyncGenerator[str, None]:
             prompt = self._build_prompt(
@@ -603,8 +627,12 @@ class ClaudeSkillService:
             available_tools = list(self.AUTO_ALLOWED_TOOLS)
             if native_skills:
                 available_tools.append("Skill")
+            allowed_tools = list(available_tools)
+            allowed_tools.extend(
+                f"mcp__{name}__*" for name in mcp_config.claude_servers
+            )
             options = ClaudeAgentOptions(
-                allowed_tools=self.AUTO_ALLOWED_TOOLS,
+                allowed_tools=allowed_tools,
                 tools=available_tools,
                 cwd=str(cwd),
                 setting_sources=["project"] if native_skills else [],
@@ -614,6 +642,8 @@ class ClaudeSkillService:
                 include_partial_messages=False,
                 max_buffer_size=10 * 1024 * 1024,
                 resume=resume_sid,
+                mcp_servers=mcp_config.claude_servers,
+                strict_mcp_config=True,
             )
             entry: Optional[_ClaudeClientEntry] = None
             warm_hit = False
@@ -641,13 +671,14 @@ class ClaudeSkillService:
 
                 logger.info(
                     "  [ClaudeRun] mode=%s warm=%s connect_ms=%.1f prompt_chars=%d "
-                    "skills=%d tools=%d cwd=%s",
+                    "skills=%d tools=%d mcp=%d cwd=%s",
                     "resume" if resume_sid else "fresh",
                     warm_hit,
                     connect_ms,
                     len(prompt),
                     skill_count,
                     len(available_tools),
+                    len(mcp_config.claude_servers),
                     cwd,
                 )
                 async for message in messages_iter:
