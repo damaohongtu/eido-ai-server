@@ -14,6 +14,7 @@ docker build -f Dockerfile -t eido-server:latest .
 
 ```bash
 mkdir -p .claude/skills logs .eido/workspaces .eido/opencode-data
+cp mcp.json mcp.local.json
 
 # 必填：Anthropic 兼容 API（直连或自建代理）
 export ANTHROPIC_BASE_URL=https://api.anthropic.com
@@ -23,6 +24,7 @@ export ANTHROPIC_API_KEY=your-api-key
 
 export ANTHROPIC_MODEL=claude-sonnet-4-6
 export AGENT_HARNESS=claude_code
+export MCP_CONFIG_FILE=./mcp.local.json
 # 可选：AGENT_HARNESS=opencode 时指定 provider/model
 # export OPENCODE_MODEL=anthropic/claude-sonnet-4-6
 
@@ -64,6 +66,7 @@ services:
       - ANTHROPIC_SMALL_FAST_MODEL=${ANTHROPIC_SMALL_FAST_MODEL:-}
       - API_TIMEOUT_MS=${API_TIMEOUT_MS:-300000}
       - EIDO_DATA_ROOT=/workspace/.eido
+      - MCP_CONFIG_PATH=/etc/eido/mcp.json
       - AGENT_HARNESS=${AGENT_HARNESS:-claude_code}
       - OPENCODE_MODEL=${OPENCODE_MODEL:-}
       - OPENCODE_CONFIG=${OPENCODE_CONFIG:-}
@@ -72,6 +75,7 @@ services:
       - ${SKILLS_DIR:-./.claude/skills}:/workspace/.claude/skills:ro
       - ${LOG_DIR:-./logs}:/var/log/eido
       - ${EIDO_DATA_DIR:-./.eido}:/workspace/.eido
+      - ${MCP_CONFIG_FILE:-./mcp.json}:/etc/eido/mcp.json:ro
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
       interval: 30s
@@ -87,6 +91,7 @@ services:
 | `./logs` | `/var/log/eido` | 应用日志 |
 | `./.eido` | `/workspace/.eido` | 会话工作区及持久化 OpenCode 凭据/数据 |
 | `./.claude/skills` | `/workspace/.claude/skills` | 技能定义（只读） |
+| `./mcp.json` | `/etc/eido/mcp.json` | Claude Code/OpenCode 共用 MCP 配置（只读） |
 
 ---
 
@@ -172,7 +177,7 @@ curl -N -X POST http://localhost:8000/api/v1/chat/chat \
 
 响应为 SSE（`text/event-stream`），每行形如 `data: {"type":"content",...}`，结束为 `data: [DONE]`。
 
-`harness` 支持 `claude_code`、`open_harness`、`opencode`。不传时使用
+`harness` 支持 `claude_code`、`opencode`。不传时使用
 `AGENT_HARNESS`。同一 `session_id` 会复用 Claude Code 子进程或续接 OpenCode
 原生会话；删除 session 时会同步回收对应执行状态。
 
@@ -224,6 +229,27 @@ docker compose run --rm eido opencode auth list
 
 完整配置、Docker/本机认证、会话续接、文件处理、日志和故障排查见
 [OpenCode 使用指南](docs/opencode.md)。
+
+### MCP 服务
+
+Server 版本通过一份只读 `mcp.json` 同时配置 Claude Code 与 OpenCode。默认文件：
+
+```json
+{
+  "mcpServers": {
+    "example": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "{env:MCP_API_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+修改后下一轮请求自动读取；不需要重建镜像。完整格式、容器网络和调用方法见
+[MCP 使用指南](docs/mcp.md)。
 
 ### 列出会话工作区文件
 

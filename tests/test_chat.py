@@ -158,7 +158,7 @@ class TestChatValidation:
             },
         )
         assert resp.status_code == 400
-        assert "claude_code, open_harness, opencode" in resp.json()["detail"]
+        assert "claude_code, opencode" in resp.json()["detail"]
 
     def test_chat_empty_messages(self):
         resp = client.post(

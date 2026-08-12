@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     OPENCODE_MODEL: str = ""
     OPENCODE_CONFIG: str = ""
     OPENCODE_CONFIG_CONTENT: str = ""
+    MCP_CONFIG_PATH: str = str(_WORKSPACE_ROOT / "mcp.json")
 
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = "logs"

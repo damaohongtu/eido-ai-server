@@ -29,6 +29,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     --trusted-host mirrors.aliyun.com
 
 COPY backend/ .
+COPY mcp.json /etc/eido/mcp.json
 
 COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
@@ -39,6 +40,7 @@ ENV SKILLS_DIR=/workspace/.claude/skills
 ENV LOG_DIR=/var/log/eido
 ENV EIDO_DATA_ROOT=/workspace/.eido
 ENV XDG_DATA_HOME=/workspace/.eido/opencode-data
+ENV MCP_CONFIG_PATH=/etc/eido/mcp.json
 
 EXPOSE 8000
 

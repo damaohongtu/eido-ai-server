@@ -402,6 +402,7 @@ class OpenCodeService:
             str(cwd),
         ]
         from app.core.config import settings
+        from app.core.mcp_config import load_mcp_config, merge_opencode_mcp_config
 
         model = (
             settings.OPENCODE_MODEL.strip()
@@ -417,10 +418,26 @@ class OpenCodeService:
         # Settings reads backend/.env without exporting it. Make values referenced
         # by OpenCode config available to the child process.
         env.update(settings.claude_agent_env)
+        try:
+            mcp_config = load_mcp_config(settings.MCP_CONFIG_PATH, environment=env)
+            merged_inline_config = merge_opencode_mcp_config(
+                settings.OPENCODE_CONFIG_CONTENT,
+                mcp_config.opencode_servers,
+            )
+        except ValueError as exc:
+            logger.error("OpenCode MCP 配置加载失败: %s", exc)
+            yield _sse({"type": "error", "message": f"MCP 配置错误: {exc}"})
+            yield "data: [DONE]\n\n"
+            return
+        logger.info(
+            "  [OpenCode/MCP] path=%s servers=%s",
+            mcp_config.path,
+            ",".join(mcp_config.server_names) or "(none)",
+        )
         if settings.OPENCODE_CONFIG.strip():
             env["OPENCODE_CONFIG"] = settings.OPENCODE_CONFIG.strip()
-        if settings.OPENCODE_CONFIG_CONTENT.strip():
-            env["OPENCODE_CONFIG_CONTENT"] = settings.OPENCODE_CONFIG_CONTENT.strip()
+        if merged_inline_config:
+            env["OPENCODE_CONFIG_CONTENT"] = merged_inline_config
         # In local mode retain ~/.local/share/opencode so credentials created by
         # `opencode auth` remain visible. Docker can opt into persistent isolation.
         if settings.EIDO_DATA_ROOT.strip():

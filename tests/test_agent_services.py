@@ -11,7 +11,7 @@ from app.services.open_code_service import (
     _log_complete_output,
     _log_semantic_event,
 )
-from app.services.open_harness_service import _log_event
+from app.core.mcp_config import load_mcp_config, merge_opencode_mcp_config
 
 
 def _payload(frame: str) -> dict:
@@ -168,38 +168,64 @@ def test_opencode_semantic_tool_log_keeps_complete_output(caplog):
     assert any(tail in record.getMessage() for record in caplog.records)
 
 
-def test_open_harness_process_log_keeps_complete_events(monkeypatch, caplog):
-    names = (
-        "AssistantTextDelta",
-        "AssistantTurnComplete",
-        "ErrorEvent",
-        "StatusEvent",
-        "ToolExecutionCompleted",
-        "ToolExecutionStarted",
+def test_mcp_config_converts_for_claude_and_opencode(tmp_path):
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "local": {
+                        "command": "npx",
+                        "args": ["-y", "server"],
+                        "env": {"TOKEN": "{env:MCP_TOKEN}"},
+                    },
+                    "remote": {
+                        "type": "sse",
+                        "url": "https://example.test/sse",
+                        "headers": {"Authorization": "${MCP_AUTH}"},
+                    },
+                    "off": {"command": "ignored", "disabled": True},
+                }
+            }
+        ),
+        encoding="utf-8",
     )
-    classes = {name: type(name, (), {}) for name in names}
-    stream_events = types.ModuleType("openharness.engine.stream_events")
-    for name, value in classes.items():
-        setattr(stream_events, name, value)
-    engine = types.ModuleType("openharness.engine")
-    engine.__path__ = []
-    engine.stream_events = stream_events
-    package = types.ModuleType("openharness")
-    package.__path__ = []
-    package.engine = engine
-    monkeypatch.setitem(sys.modules, "openharness", package)
-    monkeypatch.setitem(sys.modules, "openharness.engine", engine)
-    monkeypatch.setitem(sys.modules, "openharness.engine.stream_events", stream_events)
+    loaded = load_mcp_config(
+        config_path,
+        environment={"MCP_TOKEN": "secret", "MCP_AUTH": "Bearer token"},
+    )
+    assert loaded.server_names == ("local", "remote")
+    assert loaded.claude_servers["local"] == {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "server"],
+        "env": {"TOKEN": "secret"},
+    }
+    assert loaded.claude_servers["remote"]["type"] == "sse"
+    assert loaded.opencode_servers["local"]["command"] == [
+        "npx",
+        "-y",
+        "server",
+    ]
+    merged = json.loads(
+        merge_opencode_mcp_config('{"share":"disabled"}', loaded.opencode_servers)
+    )
+    assert merged["share"] == "disabled"
+    assert set(merged["mcp"]) == {"local", "remote"}
 
-    tail = "open-harness-tail"
-    started = classes["ToolExecutionStarted"]()
-    started.tool_name = "read_file"
-    started.tool_input = {"content": "x" * 9000 + tail}
-    state = {}
-    with caplog.at_level(logging.INFO, logger="app.services.open_harness_service"):
-        _log_event(started, state)
-    assert state["tool_calls"] == 1
-    assert any(tail in record.getMessage() for record in caplog.records)
+
+def test_mcp_config_rejects_missing_environment(tmp_path):
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(
+        '{"mcpServers":{"remote":{"type":"http","url":"https://example.test/mcp","headers":{"Authorization":"{env:MISSING_MCP_TOKEN}"}}}}',
+        encoding="utf-8",
+    )
+    try:
+        load_mcp_config(config_path, environment={})
+    except ValueError as exc:
+        assert "MISSING_MCP_TOKEN" in str(exc)
+    else:
+        raise AssertionError("missing MCP environment variable was accepted")
 
 
 def test_opencode_executes_large_json_event(tmp_path):
