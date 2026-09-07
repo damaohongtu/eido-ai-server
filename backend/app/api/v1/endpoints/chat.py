@@ -89,9 +89,25 @@ async def chat_completion(request: ChatRequest, raw_request: Request):
 
         from app.core.config import settings
 
-        harness_type = (
-            request.harness or ""
-        ).strip().lower() or settings.AGENT_HARNESS.strip().lower()
+        # Resolve the model config. When model_id is provided it determines
+        # both the harness and the model; otherwise fall back to the legacy
+        # harness field and the default model.
+        model = settings.get_model(request.model_id)
+        if model is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"未找到模型: {request.model_id}",
+            )
+
+        # When model_id is explicitly provided, the model's own harness
+        # determines the backend so the caller cannot mismatch them.
+        # Otherwise fall back to the legacy harness field.
+        if request.model_id and request.model_id.strip():
+            harness_type = model.harness.strip().lower()
+        else:
+            harness_type = (
+                request.harness or ""
+            ).strip().lower() or model.harness.strip().lower()
 
         if harness_type == "opencode":
             from app.services.open_code_service import get_open_code_service
@@ -114,7 +130,8 @@ async def chat_completion(request: ChatRequest, raw_request: Request):
             raise HTTPException(status_code=503, detail="技能服务未初始化")
 
         logger.info(
-            f"[session={request.session_id}] 聊天请求 - harness={harness_type} - 消息数: {len(request.messages)}"
+            f"[session={request.session_id}] 聊天请求 - harness={harness_type}"
+            f" - model_id={model.id} - 消息数: {len(request.messages)}"
             + (
                 f" [含流水线上下文 {len(request.context)} 字符]"
                 if request.context
@@ -131,6 +148,7 @@ async def chat_completion(request: ChatRequest, raw_request: Request):
                     request.messages,
                     request.context,
                     session_id=request.session_id,
+                    model=model,
                 ):
                     yield event
             except Exception as e:

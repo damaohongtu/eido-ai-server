@@ -6,8 +6,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncGenerator, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncGenerator, List, Optional
 from urllib.parse import urlsplit
+
+if TYPE_CHECKING:
+    from app.core.config import ModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -527,11 +530,14 @@ class ClaudeSkillService:
         context: Optional[str] = None,
         *,
         session_id: Optional[str] = None,
+        model: Optional["ModelConfig"] = None,
     ) -> AsyncGenerator[str, None]:
+        model_id = model.id if model else "(default)"
         logger.info(
             f"▶ execute_stream 开始 | 消息数: {len(messages)}"
             + (f" | session={session_id}" if session_id else "")
             + (f" | 含上下文 {len(context)} 字符" if context else "")
+            + (f" | model={model_id}" if model else "")
         )
 
         yield self._sse(
@@ -576,7 +582,7 @@ class ClaudeSkillService:
             return
 
         claude_sid = self._claude_session_ids.get(session_id or "")
-        agent_env = self._build_agent_env(session_id)
+        agent_env = self._build_agent_env(session_id, model)
         auth_error = self._agent_auth_error(agent_env)
         if auth_error:
             logger.error("Claude Agent SDK 认证配置缺失: %s", auth_error)
@@ -609,6 +615,7 @@ class ClaudeSkillService:
             str(cwd.resolve()),
             skill_revision,
             mcp_config.revision,
+            model_id,
         )
 
         async def _run_once(resume_sid: Optional[str]) -> AsyncGenerator[str, None]:
@@ -671,7 +678,7 @@ class ClaudeSkillService:
 
                 logger.info(
                     "  [ClaudeRun] mode=%s warm=%s connect_ms=%.1f prompt_chars=%d "
-                    "skills=%d tools=%d mcp=%d cwd=%s",
+                    "skills=%d tools=%d mcp=%d model=%s cwd=%s",
                     "resume" if resume_sid else "fresh",
                     warm_hit,
                     connect_ms,
@@ -679,6 +686,7 @@ class ClaudeSkillService:
                     skill_count,
                     len(available_tools),
                     len(mcp_config.claude_servers),
+                    model_id,
                     cwd,
                 )
                 async for message in messages_iter:
@@ -866,13 +874,31 @@ class ClaudeSkillService:
         )
 
     @staticmethod
-    def _build_agent_env(session_id: Optional[str]) -> dict[str, str]:
+    def _build_agent_env(
+        session_id: Optional[str],
+        model: Optional["ModelConfig"] = None,
+    ) -> dict[str, str]:
         from app.core.config import settings
 
+        if model is not None:
+            base_env = model.claude_env()
+        else:
+            base_env = settings.claude_agent_env
         env = {
-            **settings.claude_agent_env,
+            **base_env,
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
         }
+        # Carry over the global flags that are not model-specific.
+        env["API_TIMEOUT_MS"] = str(settings.API_TIMEOUT_MS)
+        for key, enabled in {
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": settings.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC,
+            "CLAUDE_CODE_USE_BEDROCK": settings.CLAUDE_CODE_USE_BEDROCK,
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS": settings.CLAUDE_CODE_USE_ANTHROPIC_AWS,
+            "CLAUDE_CODE_USE_VERTEX": settings.CLAUDE_CODE_USE_VERTEX,
+            "CLAUDE_CODE_USE_FOUNDRY": settings.CLAUDE_CODE_USE_FOUNDRY,
+        }.items():
+            if enabled:
+                env[key] = "1"
         if session_id:
             env["EIDO_SESSION_ID"] = session_id
         return env
