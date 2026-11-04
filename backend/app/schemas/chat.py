@@ -19,8 +19,3 @@ class ChatRequest(BaseModel):
         None,
         description="claude_code | opencode，不传使用 AGENT_HARNESS",
     )
-    model_id: Optional[str] = Field(
-        None,
-        description="模型 ID，对应 MODELS_CONFIG 中配置的模型；"
-        "不传时使用 DEFAULT_MODEL_ID 或首个模型",
-    )

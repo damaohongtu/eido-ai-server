@@ -9,10 +9,7 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncGenerator, Optional
-
-if TYPE_CHECKING:
-    from app.core.config import ModelConfig
+from typing import AsyncGenerator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -364,10 +361,8 @@ class OpenCodeService:
         context: Optional[str] = None,
         *,
         session_id: Optional[str] = None,
-        model: Optional["ModelConfig"] = None,
     ) -> AsyncGenerator[str, None]:
         run_started = time.perf_counter()
-        model_id = model.id if model else "(default)"
         yield _sse({"type": "thinking", "content": "正在通过 OpenCode 分析请求..."})
         yield _sse({"type": "workflow_start", "skill_name": "auto"})
         text = _latest_user_text(messages)
@@ -409,28 +404,20 @@ class OpenCodeService:
         from app.core.config import settings
         from app.core.mcp_config import load_mcp_config, merge_opencode_mcp_config
 
-        if model is not None and model.model:
-            resolved_model = model.model
-        else:
-            resolved_model = (
-                settings.OPENCODE_MODEL.strip()
-                or os.environ.get("OPENCODE_MODEL", "").strip()
-            )
-        if resolved_model:
-            args.extend(["--model", resolved_model])
+        model = (
+            settings.OPENCODE_MODEL.strip()
+            or os.environ.get("OPENCODE_MODEL", "").strip()
+        )
+        if model:
+            args.extend(["--model", model])
         if native_session_id:
             args.extend(["--session", native_session_id])
         args.append(prompt)
 
         env = os.environ.copy()
         # Settings reads backend/.env without exporting it. Make values referenced
-        # by OpenCode config available to the child process. When a model config
-        # is provided, its base_url / api_key / model override the legacy flat
-        # env vars.
-        if model is not None:
-            env.update(model.claude_env())
-        else:
-            env.update(settings.claude_agent_env)
+        # by OpenCode config available to the child process.
+        env.update(settings.claude_agent_env)
         try:
             mcp_config = load_mcp_config(settings.MCP_CONFIG_PATH, environment=env)
             merged_inline_config = merge_opencode_mcp_config(
@@ -477,13 +464,11 @@ class OpenCodeService:
             stderr_text = ""
             try:
                 logger.info(
-                    "▶ OpenCode 开始执行 | binary=%s cwd=%s resume=%s "
-                    "prompt_chars=%d model=%s",
+                    "▶ OpenCode 开始执行 | binary=%s cwd=%s resume=%s prompt_chars=%d",
                     self.binary,
                     cwd,
                     bool(native_session_id),
                     len(prompt),
-                    model_id,
                 )
                 process = await asyncio.create_subprocess_exec(
                     *args,
@@ -576,7 +561,7 @@ class OpenCodeService:
                     logger.error(
                         "OpenCode 未产生正文或工具事件 | token_total=%d | model=%s",
                         state["token_total"],
-                        resolved_model or "(OpenCode default)",
+                        model or "(OpenCode default)",
                     )
                     await queue.put(
                         _sse(
