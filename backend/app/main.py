@@ -66,10 +66,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.services.claude_skill_service import (
-        get_claude_skill_service,
-        init_claude_skill_service,
-    )
+    from app.services.agent_service import init_agent_service
     from app.services.session_workspace import get_session_workspace_manager
 
     logger.info("=" * 60)
@@ -95,19 +92,10 @@ async def lifespan(app: FastAPI):
         logger.error("✗ MCP 配置加载失败: %s", e)
 
     try:
-        svc = init_claude_skill_service(skills_dir, workspace_root)
-        skill_count = len(svc.scan_skills())
-        logger.info(f"✓ ClaudeSkillService 初始化完成: 发现 {skill_count} 个技能")
+        init_agent_service(skills_dir, workspace_root)
+        logger.info("✓ AgentService 初始化完成")
     except Exception as e:
-        logger.error(f"✗ ClaudeSkillService 初始化失败: {e}", exc_info=True)
-
-    try:
-        from app.services.open_code_service import init_open_code_service
-
-        init_open_code_service(skills_dir, workspace_root)
-        logger.info("✓ OpenCodeService 初始化完成")
-    except Exception as e:
-        logger.error(f"✗ OpenCodeService 初始化失败: {e}", exc_info=True)
+        logger.error(f"✗ AgentService 初始化失败: {e}", exc_info=True)
 
     try:
         ws = get_session_workspace_manager()
@@ -117,13 +105,6 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"Application {settings.PROJECT_NAME} v{settings.VERSION} initialized")
     yield
-
-    try:
-        svc = get_claude_skill_service()
-        if svc is not None:
-            await svc.shutdown()
-    except Exception:
-        logger.exception("关闭 ClaudeSkillService 失败")
 
 
 def create_application() -> FastAPI:

@@ -68,15 +68,11 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=400, detail=str(e)) from e
     mgr = get_session_workspace_manager()
     try:
-        from app.services.claude_skill_service import get_claude_skill_service
-        from app.services.open_code_service import get_open_code_service
+        from app.services.agent_service import get_agent_service
 
-        claude_service = get_claude_skill_service()
-        if claude_service is not None:
-            claude_service.reset_session(session_id)
-        open_code_service = get_open_code_service()
-        if open_code_service is not None:
-            open_code_service.reset_session(session_id)
+        agent_service = get_agent_service()
+        if agent_service is not None:
+            agent_service.reset_session(session_id)
     except Exception:
         logger.exception("删除会话前回收 agent 状态失败: session=%s", session_id)
     removed = mgr.remove(session_id)

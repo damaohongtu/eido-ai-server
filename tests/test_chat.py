@@ -158,7 +158,18 @@ class TestChatValidation:
             },
         )
         assert resp.status_code == 400
-        assert "claude_code, opencode" in resp.json()["detail"]
+        assert "claude_code" in resp.json()["detail"]
+
+    def test_chat_rejects_opencode_harness(self):
+        resp = client.post(
+            "/api/v1/chat/chat",
+            json={
+                "messages": [{"role": "user", "content": "hello"}],
+                "session_id": _unique_id(),
+                "harness": "opencode",
+            },
+        )
+        assert resp.status_code == 400
 
     def test_chat_empty_messages(self):
         resp = client.post(

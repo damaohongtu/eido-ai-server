@@ -87,31 +87,18 @@ async def chat_completion(request: ChatRequest, raw_request: Request):
         request_session_token = set_session_id(request.session_id)
         raw_request.state.session_id = request.session_id
 
-        from app.core.config import settings
+        from app.services.agent_service import get_agent_service
 
-        harness_type = (
-            request.harness or ""
-        ).strip().lower() or settings.AGENT_HARNESS.strip().lower()
-
-        if harness_type == "opencode":
-            from app.services.open_code_service import get_open_code_service
-
-            svc = get_open_code_service()
-        elif harness_type == "claude_code":
-            from app.services.claude_skill_service import get_claude_skill_service
-
-            svc = get_claude_skill_service()
-        else:
+        harness_type = (request.harness or "claude_code").strip().lower()
+        if harness_type != "claude_code":
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"不支持的 AI 后端: {harness_type}"
-                    "（可选: claude_code, opencode）"
-                ),
+                detail="仅支持 claude_code 执行器",
             )
 
+        svc = get_agent_service()
         if svc is None:
-            raise HTTPException(status_code=503, detail="技能服务未初始化")
+            raise HTTPException(status_code=503, detail="Agent 服务未初始化")
 
         logger.info(
             f"[session={request.session_id}] 聊天请求 - harness={harness_type} - 消息数: {len(request.messages)}"

@@ -17,5 +17,5 @@ class ChatRequest(BaseModel):
     session_id: str = Field(..., description="会话 ID")
     harness: Optional[str] = Field(
         None,
-        description="claude_code | opencode，不传使用 AGENT_HARNESS",
+        description="兼容字段：仅支持 claude_code，不传默认使用 claude_code",
     )

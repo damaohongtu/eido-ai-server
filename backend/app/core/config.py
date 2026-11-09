@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _WORKSPACE_ROOT = Path(__file__).parents[3]
@@ -29,8 +29,6 @@ class Settings(BaseSettings):
 
     EIDO_DATA_ROOT: str = ""
 
-    AGENT_HARNESS: str = "claude_code"
-
     ANTHROPIC_BASE_URL: str = ""
     ANTHROPIC_API_KEY: SecretStr = SecretStr("")
     ANTHROPIC_AUTH_TOKEN: SecretStr = SecretStr("")
@@ -43,13 +41,25 @@ class Settings(BaseSettings):
     CLAUDE_CODE_USE_VERTEX: bool = False
     CLAUDE_CODE_USE_FOUNDRY: bool = False
 
-    OPENCODE_MODEL: str = ""
-    OPENCODE_CONFIG: str = ""
-    OPENCODE_CONFIG_CONTENT: str = ""
     MCP_CONFIG_PATH: str = str(_WORKSPACE_ROOT / "mcp.json")
 
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = "logs"
+
+    @field_validator(
+        "DEBUG",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        mode="before",
+    )
+    @classmethod
+    def _empty_str_is_false(cls, v: object) -> object:
+        if isinstance(v, str) and not v.strip():
+            return False
+        return v
 
     @property
     def data_root(self) -> Path:
