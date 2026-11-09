@@ -89,19 +89,12 @@ async def chat_completion(request: ChatRequest, raw_request: Request):
 
         from app.services.agent_service import get_agent_service
 
-        harness_type = (request.harness or "claude_code").strip().lower()
-        if harness_type != "claude_code":
-            raise HTTPException(
-                status_code=400,
-                detail="仅支持 claude_code 执行器",
-            )
-
         svc = get_agent_service()
         if svc is None:
             raise HTTPException(status_code=503, detail="Agent 服务未初始化")
 
         logger.info(
-            f"[session={request.session_id}] 聊天请求 - harness={harness_type} - 消息数: {len(request.messages)}"
+            f"[session={request.session_id}] 聊天请求 - 消息数: {len(request.messages)}"
             + (
                 f" [含流水线上下文 {len(request.context)} 字符]"
                 if request.context

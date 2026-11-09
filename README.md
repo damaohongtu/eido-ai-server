@@ -149,7 +149,6 @@ curl -N -X POST http://localhost:8000/api/v1/chat/chat \
 ```
 
 响应为 SSE（`text/event-stream`），每行形如 `data: {"type":"content",...}`，结束为 `data: [DONE]`。
-请求中的 `harness` 字段为兼容保留，仅支持 `claude_code`（默认）。
 
 每个 HTTP 响应都会返回 `X-Trace-Id`。也可以由调用方传入合法的
 `X-Trace-Id` 以串联上游请求；应用日志统一包含 `traceId` 与 `sessionId`，

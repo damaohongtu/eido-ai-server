@@ -127,7 +127,10 @@ class TestWorkspace:
 
 
 class TestChatValidation:
-    def test_chat_logs_trace_and_session_ids(self, caplog):
+    def test_chat_logs_trace_and_session_ids(self, caplog, monkeypatch):
+        import app.services.agent_service as agent_service
+
+        monkeypatch.setattr(agent_service, "get_agent_service", lambda: None)
         session_id = _unique_id()
         with caplog.at_level(logging.INFO):
             resp = client.post(
@@ -136,10 +139,9 @@ class TestChatValidation:
                 json={
                     "messages": [{"role": "user", "content": "hello"}],
                     "session_id": session_id,
-                    "harness": "unknown",
                 },
             )
-        assert resp.status_code == 400
+        assert resp.status_code == 503
         response_logs = [
             record
             for record in caplog.records
@@ -147,29 +149,6 @@ class TestChatValidation:
         ]
         assert response_logs[-1].trace_id == "chat-trace-123"
         assert response_logs[-1].session_id == session_id
-
-    def test_chat_rejects_unknown_harness(self):
-        resp = client.post(
-            "/api/v1/chat/chat",
-            json={
-                "messages": [{"role": "user", "content": "hello"}],
-                "session_id": _unique_id(),
-                "harness": "unknown",
-            },
-        )
-        assert resp.status_code == 400
-        assert "claude_code" in resp.json()["detail"]
-
-    def test_chat_rejects_opencode_harness(self):
-        resp = client.post(
-            "/api/v1/chat/chat",
-            json={
-                "messages": [{"role": "user", "content": "hello"}],
-                "session_id": _unique_id(),
-                "harness": "opencode",
-            },
-        )
-        assert resp.status_code == 400
 
     def test_chat_empty_messages(self):
         resp = client.post(

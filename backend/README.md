@@ -83,8 +83,7 @@ python -m pytest ../tests
 
 ### POST `/api/v1/chat/chat`
 
-统一对话入口。执行器固定为 Claude Agent SDK；`harness` 为兼容保留字段，
-仅支持 `claude_code`（默认）。
+统一对话入口，执行器为 Claude Agent SDK。
 
 ```json
 {
