@@ -1,0 +1,26 @@
+# 版本控制与本地环境
+.git/
+.venv/
+venv/
+
+# 密钥与环境文件（凭据通过运行时环境变量注入）
+backend/.env
+.env
+*.key
+*.pem
+
+# 运行时数据与日志
+.eido/
+logs/
+__pycache__/
+*.pyc
+
+# 与镜像无关的开发文件
+.claude/
+docs/
+tests/
+scripts/
+mcp.local.json
+docker-compose*.yml
+Dockerfile*
+README.md
