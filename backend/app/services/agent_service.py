@@ -9,6 +9,18 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, List, Optional
 from urllib.parse import urlsplit
 
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError, query
+from claude_agent_sdk.types import (
+    AssistantMessage,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
+
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_SEC = 12.0
@@ -204,14 +216,6 @@ class AgentService:
             except Exception:
                 logger.exception("原生技能目录映射失败，本轮继续执行（技能不可用）")
 
-            try:
-                from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError, query
-            except ImportError:
-                logger.error("claude_agent_sdk 未安装")
-                yield self._sse({"type": "error", "message": "claude_agent_sdk 未安装"})
-                yield "data: [DONE]\n\n"
-                return
-
             latest_user_text = extract_latest_user_text(messages)
             if not latest_user_text:
                 yield self._sse({"type": "error", "message": "未找到用户输入"})
@@ -301,16 +305,11 @@ class AgentService:
                             raise _AgentAuthenticationError(
                                 self._agent_auth_failure_message()
                             )
-                        try:
-                            from claude_agent_sdk.types import ResultMessage
-
-                            if isinstance(message, ResultMessage):
-                                saw_result = True
-                                sid = getattr(message, "session_id", None)
-                                if session_id and sid:
-                                    self._claude_session_ids[session_id] = sid
-                        except ImportError:
-                            pass
+                        if isinstance(message, ResultMessage):
+                            saw_result = True
+                            sid = getattr(message, "session_id", None)
+                            if session_id and sid:
+                                self._claude_session_ids[session_id] = sid
                         for event in self._convert_message(message):
                             yield event
                 except ClaudeSDKError as exc:
@@ -474,6 +473,11 @@ class AgentService:
         }
         if session_id:
             env["EIDO_SESSION_ID"] = session_id
+            # CLI 会将其解析为 Anthropic 请求体的 metadata 字段，
+            # 供 litellm 等网关读取并上报 langfuse 做会话追踪
+            env["CLAUDE_CODE_EXTRA_METADATA"] = json.dumps(
+                {"session_id": session_id}, ensure_ascii=False
+            )
         return env
 
     @staticmethod
@@ -523,10 +527,6 @@ class AgentService:
 
     @staticmethod
     def _is_not_logged_in_message(message: object) -> bool:
-        try:
-            from claude_agent_sdk.types import AssistantMessage, TextBlock
-        except ImportError:
-            return False
         if not isinstance(message, AssistantMessage):
             return False
         return any(
@@ -538,20 +538,6 @@ class AgentService:
 
     def _log_message(self, message: object) -> None:
         """Write complete SDK messages; no preview/truncation is used in logs."""
-        try:
-            from claude_agent_sdk.types import (
-                AssistantMessage,
-                ResultMessage,
-                SystemMessage,
-                TextBlock,
-                ThinkingBlock,
-                ToolResultBlock,
-                ToolUseBlock,
-                UserMessage,
-            )
-        except ImportError:
-            return
-
         if isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock):
@@ -595,20 +581,6 @@ class AgentService:
             )
 
     def _convert_message(self, message: object) -> List[str]:
-        try:
-            from claude_agent_sdk.types import (
-                AssistantMessage,
-                ResultMessage,
-                SystemMessage,
-                TextBlock,
-                ThinkingBlock,
-                ToolResultBlock,
-                ToolUseBlock,
-                UserMessage,
-            )
-        except ImportError:
-            return []
-
         events: List[str] = []
 
         if isinstance(message, AssistantMessage):

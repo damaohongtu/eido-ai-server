@@ -18,6 +18,7 @@ from claude_agent_sdk.types import (
 )
 from pydantic import SecretStr
 
+import app.services.agent_service as agent_service
 import app.services.session_workspace as session_workspace
 from app.core.config import settings
 from app.core.mcp_config import load_mcp_config
@@ -260,7 +261,7 @@ def test_execute_stream_success_flow(tmp_path, monkeypatch):
 
         return gen()
 
-    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+    monkeypatch.setattr(agent_service, "query", fake_query)
 
     events = asyncio.run(
         _collect(
@@ -300,7 +301,7 @@ def test_execute_stream_resume_falls_back_to_fresh(tmp_path, monkeypatch):
 
         return gen()
 
-    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+    monkeypatch.setattr(agent_service, "query", fake_query)
 
     events = asyncio.run(
         _collect(
@@ -328,7 +329,7 @@ def test_execute_stream_error_suppresses_workflow_complete(tmp_path, monkeypatch
 
         return gen()
 
-    monkeypatch.setattr(claude_agent_sdk, "query", fake_query)
+    monkeypatch.setattr(agent_service, "query", fake_query)
 
     events = asyncio.run(
         _collect(
