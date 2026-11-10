@@ -120,9 +120,7 @@ class AgentService:
         "Grep",
         "Read",
         "Write",
-        "Edit",
-        "WebFetch",
-        "WebSearch",
+        "Edit"
     ]
 
     # 常驻客户端空闲回收阈值：超时后断开 CLI 进程，下轮按 sid resume 重建
