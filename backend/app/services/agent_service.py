@@ -1,4 +1,4 @@
-"""Claude Agent SDK 执行服务：原生 resume 多轮续接 + 原生 Skills + SSE 流式输出。"""
+"""Claude Agent SDK 执行服务：每会话常驻 ClaudeSDKClient + 原生多轮上下文 + SSE 流式输出。"""
 
 import asyncio
 import json
@@ -7,7 +7,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncGenerator, List, Optional
+from typing import AsyncGenerator, List, Optional
 from urllib.parse import urlsplit
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ClaudeSDKError
@@ -21,6 +21,9 @@ from claude_agent_sdk.types import (
     ToolUseBlock,
     UserMessage,
 )
+
+from app.core.config import settings
+from app.core.mcp_config import load_mcp_config
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +78,8 @@ def extract_latest_user_text(messages: list) -> str:
     return ""
 
 
-class _ResumeUnavailable(RuntimeError):
-    def __init__(self, cause: Exception):
-        super().__init__(str(cause))
-        self.cause = cause
-
-
-class _ClientDied(RuntimeError):
-    """常驻客户端本轮尚未产出任何消息即失败：可安全丢弃并重建后重试。"""
+class _TurnRecoverable(RuntimeError):
+    """本轮可安全降级重试：resume 连接失败，或常驻客户端未产出任何消息即失败。"""
 
     def __init__(self, cause: Exception):
         super().__init__(str(cause))
@@ -229,35 +226,12 @@ class AgentService:
                 yield "data: [DONE]\n\n"
                 return
 
-            agent_env = self._build_agent_env(session_id)
-            auth_error = self._agent_auth_error(agent_env)
+            auth_error = self._agent_auth_error(settings.claude_agent_env)
             if auth_error:
                 logger.error("Claude Agent SDK 认证配置缺失: %s", auth_error)
                 yield self._sse({"type": "error", "message": auth_error})
                 yield "data: [DONE]\n\n"
                 return
-            from app.core.config import settings
-            from app.core.mcp_config import load_mcp_config
-
-            mcp_environment = {**os.environ, **agent_env}
-            try:
-                mcp_config = load_mcp_config(
-                    settings.MCP_CONFIG_PATH, environment=mcp_environment
-                )
-            except ValueError as exc:
-                logger.error("Claude MCP 配置加载失败: %s", exc)
-                yield self._sse(
-                    {"type": "error", "message": f"MCP 配置错误: {exc}"}
-                )
-                yield "data: [DONE]\n\n"
-                return
-            auth_mode, provider = self._agent_auth_summary(agent_env)
-            logger.info("  [ClaudeAuth] mode=%s provider=%s", auth_mode, provider)
-            logger.info(
-                "  [ClaudeMCP] path=%s servers=%s",
-                mcp_config.path,
-                ",".join(mcp_config.server_names) or "(none)",
-            )
 
             queue: asyncio.Queue = asyncio.Queue()
             _SENTINEL = object()
@@ -272,8 +246,6 @@ class AgentService:
                             context=context,
                         ),
                         cwd=cwd,
-                        agent_env=agent_env,
-                        mcp_config=mcp_config,
                     ):
                         await queue.put(ev)
                 except asyncio.CancelledError:
@@ -282,6 +254,12 @@ class AgentService:
                     logger.error("Claude Agent SDK 认证失败: %s", e)
                     had_error["v"] = True
                     await queue.put(self._sse({"type": "error", "message": str(e)}))
+                except ValueError as e:
+                    logger.error("Claude MCP 配置加载失败: %s", e)
+                    had_error["v"] = True
+                    await queue.put(
+                        self._sse({"type": "error", "message": f"MCP 配置错误: {e}"})
+                    )
                 except Exception as e:
                     logger.error(f"技能自动执行失败: {e}", exc_info=True)
                     had_error["v"] = True
@@ -353,21 +331,30 @@ class AgentService:
             strict_mcp_config=True,
         )
 
-    async def _connect_entry(
+    async def _connect_client(
         self,
         session_key: Optional[str],
         *,
         cwd: Path,
-        agent_env: dict[str, str],
-        mcp_config: Any,
         resume_sid: Optional[str],
     ) -> _SessionClient:
-        """新建常驻客户端并启动 CLI 进程；resume 失败抛 _ResumeUnavailable。
+        """加载 env/MCP 配置并启动常驻 CLI 进程；resume 失败抛 _TurnRecoverable。
 
+        客户端的 env/MCP 配置在创建时固化，配置变更需会话重建或服务重启生效。
         带 session_key 时登记到 self._clients 供后续轮次复用；匿名请求不登记，
-        由调用方在本轮结束后断开。注意：客户端的 env/MCP 配置在创建时固化，
-        配置变更需等待会话重建或服务重启才生效。
+        由调用方在本轮结束后断开。
         """
+        agent_env = self._build_agent_env(session_key)
+        auth_mode, provider = self._agent_auth_summary(agent_env)
+        logger.info("  [ClaudeAuth] mode=%s provider=%s", auth_mode, provider)
+        mcp_config = load_mcp_config(
+            settings.MCP_CONFIG_PATH, environment={**os.environ, **agent_env}
+        )
+        logger.info(
+            "  [ClaudeMCP] path=%s servers=%s",
+            mcp_config.path,
+            ",".join(mcp_config.server_names) or "(none)",
+        )
         options = self._build_agent_options(
             cwd=cwd,
             agent_env=agent_env,
@@ -380,7 +367,7 @@ class AgentService:
             await client.connect()
         except ClaudeSDKError as exc:
             if resume_sid:
-                raise _ResumeUnavailable(exc) from exc
+                raise _TurnRecoverable(exc) from exc
             raise
         logger.info(
             "  [ClaudeClient] connected mode=%s connect_ms=%.0f tools=%d mcp=%d cwd=%s",
@@ -430,7 +417,7 @@ class AgentService:
                     break
         except ClaudeSDKError as exc:
             if message_count == 0:
-                raise _ClientDied(exc) from exc
+                raise _TurnRecoverable(exc) from exc
             raise
         finally:
             logger.info(
@@ -448,72 +435,65 @@ class AgentService:
         session_key: Optional[str],
         prompt: str,
         cwd: Path,
-        agent_env: dict[str, str],
-        mcp_config: Any,
     ) -> AsyncGenerator[str, None]:
-        """执行一轮：复用常驻客户端，失败时自动降级重试。
+        """执行一轮：复用常驻客户端，失败自动降级 resume → 全新重建。
 
-        重试链：复用常驻客户端 → 带 sid resume 重建（上下文保留）→
-        全新重建（sid 已清）。匿名请求不持久化，本轮结束即断开。
+        策略按序尝试：reuse（有常驻客户端）→ resume（有 sid）→ fresh。
+        每次失败丢弃状态未知的客户端，下一策略从干净状态开始；匿名请求
+        不持久化，本轮结束即断开。
         """
         entry = self._clients.get(session_key) if session_key else None
         if entry is not None:
             entry.last_used = time.monotonic()
+        modes = [
+            mode
+            for mode, available in (
+                ("reuse", entry is not None),
+                (
+                    "resume",
+                    bool(session_key and self._claude_session_ids.get(session_key)),
+                ),
+                ("fresh", True),
+            )
+            if available
+        ]
+        anon_client: Optional[ClaudeSDKClient] = None
         try:
-            for attempt in range(1, 4):
-                mode = "reuse" if entry is not None else None
-                if entry is None:
-                    resume_sid = (
-                        self._claude_session_ids.get(session_key)
-                        if session_key
-                        else None
-                    )
-                    try:
-                        entry = await self._connect_entry(
-                            session_key,
-                            cwd=cwd,
-                            agent_env=agent_env,
-                            mcp_config=mcp_config,
-                            resume_sid=resume_sid,
-                        )
-                        mode = "resume" if resume_sid else "fresh"
-                    except _ResumeUnavailable as exc:
-                        logger.warning(
-                            "resume(%s) 连接失败，清 sid 并回退到重建模式: %s",
-                            resume_sid,
-                            exc.cause,
-                        )
-                        if session_key:
-                            self._claude_session_ids.pop(session_key, None)
-                        yield self._sse(
-                            {"type": "thinking", "content": "原会话已失效，重建中..."}
-                        )
-                        continue
+            for mode in modes:
                 try:
+                    if mode == "reuse":
+                        candidate = entry
+                    else:
+                        resume_sid = (
+                            self._claude_session_ids.get(session_key)
+                            if mode == "resume"
+                            else None
+                        )
+                        candidate = await self._connect_client(
+                            session_key, cwd=cwd, resume_sid=resume_sid
+                        )
+                        if not session_key:
+                            anon_client = candidate.client
                     async for ev in self._run_turn(
-                        entry.client,
+                        candidate.client,
                         prompt=prompt,
                         session_key=session_key,
-                        mode=mode or "fresh",
+                        mode=mode,
                     ):
                         yield ev
                     return
-                except _ClientDied as exc:
+                except _TurnRecoverable as exc:
                     await self._drop_client(session_key)
                     logger.warning(
-                        "常驻客户端第 %d 次尝试无输出失败，丢弃重建: %s",
-                        attempt,
-                        exc.cause,
+                        "模式 %s 本轮失败，丢弃客户端后降级重试: %s", mode, exc.cause
                     )
                     if mode == "resume":
-                        # resume 会话已连上但首轮无输出：判定 resume 不可用，清 sid 走全新重建
+                        # resume 上下文已不可用：清 sid，下一策略全新重建
                         if session_key:
                             self._claude_session_ids.pop(session_key, None)
                         yield self._sse(
                             {"type": "thinking", "content": "原会话已失效，重建中..."}
                         )
-                    entry = None
-                    continue
             raise ClaudeSDKError("客户端重试多次后仍失败")
         except BaseException:
             # 本轮以失败告终：常驻客户端可能停留在轮次中间态，丢弃以保证下轮干净重建
@@ -521,9 +501,9 @@ class AgentService:
                 await self._drop_client(session_key)
             raise
         finally:
-            if not session_key and entry is not None:
+            if anon_client is not None:
                 try:
-                    await entry.client.disconnect()
+                    await anon_client.disconnect()
                 except Exception:
                     logger.debug("断开匿名客户端失败", exc_info=True)
 
@@ -540,8 +520,6 @@ class AgentService:
 
     @staticmethod
     def _build_agent_env(session_id: Optional[str]) -> dict[str, str]:
-        from app.core.config import settings
-
         env = {
             **settings.claude_agent_env,
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",

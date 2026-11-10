@@ -488,6 +488,77 @@ def test_execute_stream_busy_session_rejected(tmp_path, monkeypatch):
     assert "sess_busy" in service._busy_sessions
 
 
+def test_execute_stream_reuse_skips_config_load(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    real_load = agent_service.load_mcp_config
+    calls = {"load": 0}
+
+    def counting_load(path, environment=None):
+        calls["load"] += 1
+        return real_load(path, environment=environment)
+
+    monkeypatch.setattr(agent_service, "load_mcp_config", counting_load)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [
+            {
+                "turns": [
+                    [
+                        AssistantMessage(content=[TextBlock(text="第一答")], model="test"),
+                        _result(session_id="cs_cfg"),
+                    ],
+                    [
+                        AssistantMessage(content=[TextBlock(text="第二答")], model="test"),
+                        _result(session_id="cs_cfg"),
+                    ],
+                ]
+            },
+        ],
+    )
+
+    for question in ("第一问", "第二问"):
+        events = asyncio.run(
+            _collect(
+                service.execute_stream(
+                    [{"role": "user", "content": question}],
+                    session_id="sess_cfg",
+                )
+            )
+        )
+        payloads = [_payload(e) for e in events if e.startswith("data: {")]
+        assert payloads[-1]["type"] == "workflow_complete"
+
+    assert calls["load"] == 1, "复用常驻客户端的轮次不应重新加载 MCP 配置"
+    assert len(clients) == 1
+
+
+def test_execute_stream_mcp_config_error_reports_frame(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(
+        '{"mcpServers":{"remote":{"type":"http","url":"https://example.test/mcp",'
+        '"headers":{"Authorization":"{env:MISSING_MCP_TOKEN}"}}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "MCP_CONFIG_PATH", str(config_path))
+    clients = _install_fake_clients(monkeypatch, [{}])
+
+    events = asyncio.run(
+        _collect(
+            service.execute_stream(
+                [{"role": "user", "content": "hi"}],
+                session_id="sess_mcp_err",
+            )
+        )
+    )
+    payloads = [_payload(e) for e in events if e.startswith("data: {")]
+    assert payloads[-1]["type"] == "error"
+    assert "MCP 配置错误" in payloads[-1]["message"]
+    assert "MISSING_MCP_TOKEN" in payloads[-1]["message"]
+    assert not any(p["type"] == "workflow_complete" for p in payloads)
+    assert clients == [], "配置加载失败不应创建客户端"
+
+
 def test_execute_stream_missing_auth_reports_error(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "MCP_CONFIG_PATH", "")
     monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", SecretStr(""))
