@@ -3,6 +3,7 @@ FROM ${BASE_IMAGE}
 
 WORKDIR /app
 COPY backend/ .
+# 占位默认配置；运行时通过 bind mount 覆盖（compose 挂载 ${MCP_CONFIG_FILE:-./mcp.json}）
 COPY mcp.json /etc/eido/mcp.json
 
 RUN mkdir -p /workspace/.claude/skills /var/log/eido
