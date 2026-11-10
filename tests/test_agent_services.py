@@ -329,6 +329,11 @@ def test_execute_stream_success_flow(tmp_path, monkeypatch):
 
 def test_execute_stream_reuses_client_on_second_turn(tmp_path, monkeypatch):
     service = _make_service(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "EIDO_AGENT_NAME", "eido-worker")
+    monkeypatch.setenv(
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "X-Client: eido\nLangfuse_Session_Id: old-session\nLangfuse_Trace_User_Id: old-user",
+    )
     clients = _install_fake_clients(
         monkeypatch,
         [
@@ -368,6 +373,11 @@ def test_execute_stream_reuses_client_on_second_turn(tmp_path, monkeypatch):
     assert second_payloads[-1]["type"] == "workflow_complete"
     assert len(clients) == 1, "第二轮应复用常驻客户端，不再新建进程"
     assert clients[0].prompts == ["第一问", "第二问"]
+    assert clients[0].options.env["ANTHROPIC_CUSTOM_HEADERS"].splitlines() == [
+        "X-Client: eido",
+        "langfuse_session_id: sess_reuse",
+        "langfuse_trace_user_id: eido-worker",
+    ]
 
 
 def test_execute_stream_resume_falls_back_to_fresh(tmp_path, monkeypatch):

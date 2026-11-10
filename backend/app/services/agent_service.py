@@ -408,13 +408,21 @@ class AgentService:
             **settings.claude_agent_env,
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
         }
+        # LiteLLM 将这两个请求头映射到 Langfuse 的 Session ID 和 User ID。
+        tracing_headers: dict[str, str] = {}
         if session_id:
             env["EIDO_SESSION_ID"] = session_id
-            # CLI 会将其解析为 Anthropic 请求体的 metadata 字段，
-            # 供 litellm 等网关读取并上报 langfuse 做会话追踪
-            env["CLAUDE_CODE_EXTRA_METADATA"] = json.dumps(
-                {"session_id": session_id}, ensure_ascii=False
-            )
+            tracing_headers["langfuse_session_id"] = session_id
+        if settings.EIDO_AGENT_NAME:
+            tracing_headers["langfuse_trace_user_id"] = settings.EIDO_AGENT_NAME
+        if tracing_headers:
+            headers = [
+                line
+                for line in os.environ.get("ANTHROPIC_CUSTOM_HEADERS", "").splitlines()
+                if line.partition(":")[0].strip().lower() not in tracing_headers
+            ]
+            headers.extend(f"{name}: {value}" for name, value in tracing_headers.items())
+            env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(headers)
         return env
 
     def _log_message(self, message: object) -> None:
