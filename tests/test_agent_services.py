@@ -24,7 +24,6 @@ from app.core.config import settings
 from app.core.mcp_config import load_mcp_config
 from app.services.agent_service import (
     AgentService,
-    build_conversation_history_before_latest_user,
     extract_latest_user_text,
 )
 from app.services.session_workspace import SessionWorkspaceManager
@@ -89,54 +88,32 @@ def test_native_skills_link_is_idempotent_and_repairing(tmp_path, monkeypatch):
     assert not unmanaged.is_symlink()
 
 
-def test_extract_latest_user_text_and_history():
+def test_extract_latest_user_text():
     msgs = [
         {"role": "user", "content": "第一问"},
         {"role": "assistant", "content": "第一答"},
         {"role": "user", "content": "  第二问  "},
     ]
     assert extract_latest_user_text(msgs) == "第二问"
-    history = build_conversation_history_before_latest_user(msgs)
-    assert "**user**: 第一问" in history
-    assert "第二问" not in history
 
 
-def test_build_prompt_fresh_and_resume(tmp_path):
+def test_build_prompt_passthrough_with_context(tmp_path):
     service = AgentService(tmp_path / "skills", tmp_path)
-    cwd = tmp_path / "ws"
 
-    fresh = service._build_prompt(
-        cwd=cwd,
-        latest_user_text="分析财报",
-        conversation_history="**user**: 上一轮",
-        context="上一步输出",
-    )
-    assert str(cwd / "outputs") in fresh
-    assert "技能" in fresh
-    assert "上一轮" in fresh
-    assert "分析财报" in fresh
-    assert "上一步输出" in fresh
+    plain = service._build_prompt(latest_user_text="分析财报", context=None)
+    assert plain == "分析财报"
 
-    resumed = service._build_prompt(
-        cwd=cwd,
-        latest_user_text="继续",
-        conversation_history="",
-        context=None,
-        resume=True,
+    with_context = service._build_prompt(
+        latest_user_text="分析财报", context="上一步输出"
     )
-    assert resumed.strip().startswith("## 用户最新请求")
-    assert "继续" in resumed
+    assert with_context.startswith("分析财报")
+    assert "上一步输出" in with_context
 
-    long_context = "x" * 5000
-    truncated = service._build_prompt(
-        cwd=cwd,
-        latest_user_text="q",
-        conversation_history="",
-        context=long_context,
-        resume=True,
+    long_context = "x" * 9000
+    untruncated = service._build_prompt(
+        latest_user_text="q", context=long_context
     )
-    assert "x" * 4000 in truncated
-    assert "x" * 4001 not in truncated
+    assert "x" * 9000 in untruncated
 
 
 def test_claude_sdk_logging_keeps_complete_content(tmp_path, caplog):

@@ -74,52 +74,6 @@ def extract_latest_user_text(messages: list) -> str:
     return ""
 
 
-def build_conversation_history_before_latest_user(
-    messages: list, *, max_chars: int = 12_000
-) -> str:
-    latest_user_index = next(
-        (
-            index
-            for index in range(len(messages) - 1, -1, -1)
-            if (
-                getattr(messages[index], "role", None)
-                or (
-                    messages[index].get("role")
-                    if isinstance(messages[index], dict)
-                    else ""
-                )
-            )
-            == "user"
-        ),
-        len(messages),
-    )
-    history = messages[:latest_user_index]
-    selected: list[str] = []
-    used = 0
-    for message in reversed(history):
-        role = (
-            getattr(message, "role", None)
-            or (message.get("role") if isinstance(message, dict) else "")
-            or ""
-        )
-        content = (
-            getattr(message, "content", None)
-            or (message.get("content") if isinstance(message, dict) else "")
-            or ""
-        )
-        if not role or not content:
-            continue
-        block = f"**{role}**: {content[:4000]}"
-        if selected and used + len(block) > max_chars:
-            break
-        if len(block) > max_chars:
-            block = block[:max_chars]
-        selected.append(block)
-        used += len(block)
-    selected.reverse()
-    return "\n\n".join(selected)
-
-
 class _ResumeUnavailable(RuntimeError):
     def __init__(self, cause: Exception):
         super().__init__(str(cause))
@@ -255,15 +209,8 @@ class AgentService:
 
             async def _run_once(resume_sid: Optional[str]) -> AsyncGenerator[str, None]:
                 prompt = self._build_prompt(
-                    cwd=cwd,
                     latest_user_text=latest_user_text,
-                    conversation_history=(
-                        build_conversation_history_before_latest_user(messages)
-                        if not resume_sid
-                        else ""
-                    ),
                     context=context,
-                    resume=bool(resume_sid),
                 )
                 available_tools = list(self.AUTO_ALLOWED_TOOLS)
                 available_tools.append("Skill")
@@ -279,8 +226,6 @@ class AgentService:
                     skills="all",
                     permission_mode="acceptEdits",
                     env=agent_env,
-                    include_partial_messages=False,
-                    max_buffer_size=10 * 1024 * 1024,
                     resume=resume_sid,
                     mcp_servers=mcp_config.servers,
                     strict_mcp_config=True,
@@ -418,50 +363,15 @@ class AgentService:
         yield "data: [DONE]\n\n"
 
     def _build_prompt(
-        self,
-        *,
-        cwd: Path,
-        latest_user_text: str,
-        conversation_history: str,
-        context: Optional[str],
-        resume: bool = False,
+        self, *, latest_user_text: str, context: Optional[str]
     ) -> str:
-        context_section = ""
+        """原生透传：多轮上下文由 Claude Code 原生 resume 会话承载，不做手工拼接。"""
         if context and context.strip():
-            bounded_context = context.strip()[:4000]
-            context_section = (
-                f"\n\n---\n\n## 上一步执行结果（供参考）\n\n{bounded_context}\n"
+            return (
+                f"{latest_user_text}\n\n---\n\n"
+                f"## 上一步执行结果（供参考）\n\n{context.strip()}"
             )
-
-        if resume:
-            return f"## 用户最新请求\n\n{latest_user_text}{context_section}"
-
-        skills_root_abs = Path(self.skills_dir).resolve()
-        workspace_section = (
-            f"**当前会话工作区（你的 cwd）**: `{cwd}`\n"
-            f"  - 用户上传文件位于: `{cwd / 'uploads'}`\n"
-            f"  - 你生成的所有产物请写入: `{cwd / 'outputs'}`\n"
-            f"**技能库根目录（绝对路径，仅可读取）**: `{skills_root_abs}`\n"
-        )
-        history_section = ""
-        if conversation_history:
-            history_section = f"\n\n## 对话历史\n\n{conversation_history}\n\n---\n\n"
-        skills_section = (
-            "## 技能使用\n\n"
-            "可用技能已由 Claude Code 原生 Skills 机制注册。根据请求按需调用 Skill；"
-            "技能正文会在命中后加载，无需先读取或枚举 SKILL.md。\n\n---\n\n"
-        )
-        return (
-            f"{workspace_section}\n"
-            f"{skills_section}"
-            f"## 执行说明\n\n"
-            f"- 所有写文件操作请落在 `{cwd / 'outputs'}` 目录下；不要写到工作区之外。\n"
-            f"- 用户上传文件已在消息中提供绝对路径，可直接 Read。\n\n"
-            f"---\n"
-            f"{history_section}"
-            f"## 用户最新请求\n\n{latest_user_text}"
-            f"{context_section}"
-        )
+        return latest_user_text
 
     @staticmethod
     def _build_agent_env(session_id: Optional[str]) -> dict[str, str]:
