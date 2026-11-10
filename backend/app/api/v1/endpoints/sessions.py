@@ -72,7 +72,7 @@ async def delete_session(session_id: str):
 
         agent_service = get_agent_service()
         if agent_service is not None:
-            agent_service.reset_session(session_id)
+            await agent_service.reset_session(session_id)
     except Exception:
         logger.exception("删除会话前回收 agent 状态失败: session=%s", session_id)
     removed = mgr.remove(session_id)

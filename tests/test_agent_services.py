@@ -1,11 +1,9 @@
 import asyncio
 import json
 import logging
-import os
 from pathlib import Path
 
-import claude_agent_sdk
-from claude_agent_sdk import ClaudeSDKError
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError
 from claude_agent_sdk.types import (
     AssistantMessage,
     ResultMessage,
@@ -42,6 +40,52 @@ def _result(session_id: str = "cs_1") -> ResultMessage:
         num_turns=2,
         session_id=session_id,
     )
+
+
+class _FakeClient:
+    """替代 ClaudeSDKClient：按脚本回放 connect/query/receive_messages。"""
+
+    def __init__(self, options: ClaudeAgentOptions, spec: dict):
+        self.options = options
+        self.prompts: list[str] = []
+        self.connect_error = spec.get("connect_error")
+        self.turns: list = list(spec.get("turns", []))
+        self.disconnected = False
+
+    async def connect(self):
+        if self.connect_error:
+            raise self.connect_error
+
+    async def query(self, prompt):
+        self.prompts.append(prompt)
+
+    def receive_messages(self):
+        async def gen():
+            if not self.turns:
+                return
+            turn = self.turns.pop(0)
+            if isinstance(turn, Exception):
+                raise turn
+            for message in turn:
+                yield message
+
+        return gen()
+
+    async def disconnect(self):
+        self.disconnected = True
+
+
+def _install_fake_clients(monkeypatch, specs: list[dict]) -> list[_FakeClient]:
+    clients: list[_FakeClient] = []
+
+    def factory(options):
+        spec = specs[len(clients)] if len(clients) < len(specs) else {}
+        client = _FakeClient(options, spec)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(agent_service, "ClaudeSDKClient", factory)
+    return clients
 
 
 def _make_service(tmp_path: Path, monkeypatch) -> AgentService:
@@ -225,20 +269,22 @@ def test_mcp_config_rejects_missing_environment(tmp_path):
 
 def test_execute_stream_success_flow(tmp_path, monkeypatch):
     service = _make_service(tmp_path, monkeypatch)
-    calls = []
-
-    def fake_query(prompt, options):
-        async def gen():
-            calls.append((prompt, options))
-            yield SystemMessage(subtype="init", data={"tools": ["Bash"]})
-            yield AssistantMessage(
-                content=[TextBlock(text="分析完成")], model="test"
-            )
-            yield _result(session_id="cs_run_1")
-
-        return gen()
-
-    monkeypatch.setattr(agent_service, "query", fake_query)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [
+            {
+                "turns": [
+                    [
+                        SystemMessage(subtype="init", data={"tools": ["Bash"]}),
+                        AssistantMessage(
+                            content=[TextBlock(text="分析完成")], model="test"
+                        ),
+                        _result(session_id="cs_run_1"),
+                    ]
+                ]
+            }
+        ],
+    )
 
     events = asyncio.run(
         _collect(
@@ -256,29 +302,78 @@ def test_execute_stream_success_flow(tmp_path, monkeypatch):
     assert payloads[-1] == {"type": "workflow_complete", "data": {"references": []}}
     assert events[-1] == "data: [DONE]\n\n"
     assert service._claude_session_ids["sess_ok"] == "cs_run_1"
-    assert calls[0][1].resume is None
-    assert "Skill" in calls[0][1].tools
+    assert clients[0].options.resume is None
+    assert clients[0].prompts == ["分析数据"]
+    assert "Skill" in clients[0].options.tools
+    assert service._clients["sess_ok"].client is clients[0]
+    assert not clients[0].disconnected
     ws_link = tmp_path / "workspaces" / "sess_ok" / ".claude" / "skills"
     assert ws_link.is_symlink()
     assert service._busy_sessions == set()
 
 
+def test_execute_stream_reuses_client_on_second_turn(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [
+            {
+                "turns": [
+                    [
+                        AssistantMessage(content=[TextBlock(text="第一答")], model="test"),
+                        _result(session_id="cs_persist"),
+                    ],
+                    [
+                        AssistantMessage(content=[TextBlock(text="第二答")], model="test"),
+                        _result(session_id="cs_persist"),
+                    ],
+                ]
+            },
+        ],
+    )
+
+    first = asyncio.run(
+        _collect(
+            service.execute_stream(
+                [{"role": "user", "content": "第一问"}], session_id="sess_reuse"
+            )
+        )
+    )
+    second = asyncio.run(
+        _collect(
+            service.execute_stream(
+                [{"role": "user", "content": "第二问"}], session_id="sess_reuse"
+            )
+        )
+    )
+    first_payloads = [_payload(e) for e in first if e.startswith("data: {")]
+    second_payloads = [_payload(e) for e in second if e.startswith("data: {")]
+    assert {"type": "content", "content": "第一答"} in first_payloads
+    assert {"type": "content", "content": "第二答"} in second_payloads
+    assert second_payloads[-1]["type"] == "workflow_complete"
+    assert len(clients) == 1, "第二轮应复用常驻客户端，不再新建进程"
+    assert clients[0].prompts == ["第一问", "第二问"]
+
+
 def test_execute_stream_resume_falls_back_to_fresh(tmp_path, monkeypatch):
     service = _make_service(tmp_path, monkeypatch)
     service._claude_session_ids["sess_resume"] = "cs_stale"
-    attempts = []
-
-    def fake_query(prompt, options):
-        async def gen():
-            attempts.append(options.resume)
-            if options.resume == "cs_stale":
-                raise ClaudeSDKError("resume failed")
-            yield AssistantMessage(content=[TextBlock(text="重建成功")], model="test")
-            yield _result(session_id="cs_new")
-
-        return gen()
-
-    monkeypatch.setattr(agent_service, "query", fake_query)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [
+            {"connect_error": ClaudeSDKError("resume failed")},
+            {
+                "turns": [
+                    [
+                        AssistantMessage(
+                            content=[TextBlock(text="重建成功")], model="test"
+                        ),
+                        _result(session_id="cs_new"),
+                    ]
+                ]
+            },
+        ],
+    )
 
     events = asyncio.run(
         _collect(
@@ -289,24 +384,72 @@ def test_execute_stream_resume_falls_back_to_fresh(tmp_path, monkeypatch):
         )
     )
     payloads = [_payload(e) for e in events if e.startswith("data: {")]
-    assert attempts == ["cs_stale", None]
+    assert [c.options.resume for c in clients] == ["cs_stale", None]
     assert any("原会话已失效" in p["content"] for p in payloads if p["type"] == "thinking")
     assert {"type": "content", "content": "重建成功"} in payloads
     assert payloads[-1]["type"] == "workflow_complete"
     assert service._claude_session_ids["sess_resume"] == "cs_new"
+    assert service._clients["sess_resume"].client is clients[1]
+
+
+def test_execute_stream_recovers_dead_client_with_resume(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [
+            {
+                "turns": [
+                    [
+                        AssistantMessage(content=[TextBlock(text="第一答")], model="test"),
+                        _result(session_id="cs_alive"),
+                    ],
+                    # 第二轮复用同一客户端时进程已死：首轮消息前抛连接错误
+                    ClaudeSDKError("cli process died mid-idle"),
+                ]
+            },
+            {
+                "turns": [
+                    [
+                        AssistantMessage(
+                            content=[TextBlock(text="重建后作答")], model="test"
+                        ),
+                        _result(session_id="cs_alive"),
+                    ]
+                ]
+            },
+        ],
+    )
+
+    first = asyncio.run(
+        _collect(
+            service.execute_stream(
+                [{"role": "user", "content": "第一问"}], session_id="sess_dead"
+            )
+        )
+    )
+    second = asyncio.run(
+        _collect(
+            service.execute_stream(
+                [{"role": "user", "content": "第二问"}], session_id="sess_dead"
+            )
+        )
+    )
+    first_payloads = [_payload(e) for e in first if e.startswith("data: {")]
+    second_payloads = [_payload(e) for e in second if e.startswith("data: {")]
+    assert {"type": "content", "content": "第一答"} in first_payloads
+    assert {"type": "content", "content": "重建后作答"} in second_payloads
+    assert second_payloads[-1]["type"] == "workflow_complete"
+    assert clients[0].disconnected, "死亡客户端应被断开回收"
+    assert clients[1].options.resume == "cs_alive", "重建应带 sid 保留上下文"
+    assert service._clients["sess_dead"].client is clients[1]
 
 
 def test_execute_stream_error_suppresses_workflow_complete(tmp_path, monkeypatch):
     service = _make_service(tmp_path, monkeypatch)
-
-    def fake_query(prompt, options):
-        async def gen():
-            raise RuntimeError("agent crashed")
-            yield  # pragma: no cover
-
-        return gen()
-
-    monkeypatch.setattr(agent_service, "query", fake_query)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [{"turns": [RuntimeError("agent crashed")]}],
+    )
 
     events = asyncio.run(
         _collect(
@@ -322,6 +465,8 @@ def test_execute_stream_error_suppresses_workflow_complete(tmp_path, monkeypatch
     assert not any(p["type"] == "workflow_complete" for p in payloads)
     assert events[-1] == "data: [DONE]\n\n"
     assert service._busy_sessions == set()
+    assert "sess_err" not in service._clients, "失败轮次后应丢弃状态未知的客户端"
+    assert clients[0].disconnected
 
 
 def test_execute_stream_busy_session_rejected(tmp_path, monkeypatch):

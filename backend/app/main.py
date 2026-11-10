@@ -105,6 +105,15 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"Application {settings.PROJECT_NAME} v{settings.VERSION} initialized")
     yield
+    try:
+        from app.services.agent_service import get_agent_service
+
+        service = get_agent_service()
+        if service is not None:
+            await service.aclose()
+            logger.info("✓ 常驻 Claude 客户端已全部断开")
+    except Exception:
+        logger.exception("关闭常驻 Claude 客户端失败")
 
 
 def create_application() -> FastAPI:
