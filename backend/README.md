@@ -109,17 +109,17 @@ python -m pytest ../tests
 
 核心服务位于 `app/services/agent_service.py`：
 
-- **`execute_stream(messages, context, session_id=...)`** — 通过 SDK 一次性
-  `query()` 执行，以 SSE 格式流式返回。
-- **多轮续接**：SDK 原生 `resume`。首轮记录 `ResultMessage.session_id`，
-  同一 Eido session 的后续请求自动续接；resume 失败时自动回退重建。
+- **`execute_stream(messages, context, session_id=...)`** 使用 `ClaudeSDKClient.query()`
+  提交提示，通过 `receive_response()` 接收单轮响应并转换成现有 SSE 事件。
+- **多轮续接**：同一会话复用客户端。客户端被回收后，服务使用内存中记录的原生会话
+  ID `resume`。Claude Code 确认旧会话不存在时，服务会新建会话。
 - **技能加载**：`SKILLS_DIR` 以目录符号链接挂到会话工作区 `.claude/skills/`，
   由 Claude Code 原生 Skills 机制按需加载，无需扫描解析。
-- **并发保护**：同一 session 同时只允许一轮执行。
+- **并发保护**：同一会话同时只执行一轮。删除会话时先取消执行并断开客户端，再移除工作区。
 - SDK 消息（正文、推理、工具输入/输出、执行汇总）均完整写入带
   `traceId`、`sessionId` 的日志。
 
 ## MCP 配置
 
-`MCP_CONFIG_PATH` 指向标准 `{"mcpServers": {...}}` JSON。每轮执行前重新读取，
-修改后无需重启。完整说明见 [MCP 使用指南](../docs/mcp.md)。
+`MCP_CONFIG_PATH` 指向标准 `{"mcpServers": {...}}` JSON。配置在创建客户端时读取，
+由该客户端的后续轮次复用。完整说明见 [MCP 使用指南](../docs/mcp.md)。

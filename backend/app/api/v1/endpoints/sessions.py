@@ -66,16 +66,14 @@ async def delete_session(session_id: str):
         validate_session_id(session_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    mgr = get_session_workspace_manager()
-    try:
-        from app.services.agent_service import get_agent_service
+    from app.services.agent_service import get_agent_service
 
-        agent_service = get_agent_service()
-        if agent_service is not None:
-            await agent_service.reset_session(session_id)
-    except Exception:
-        logger.exception("删除会话前回收 agent 状态失败: session=%s", session_id)
-    removed = mgr.remove(session_id)
+    agent_service = get_agent_service()
+    removed = (
+        await agent_service.delete_session(session_id)
+        if agent_service is not None
+        else get_session_workspace_manager().remove(session_id)
+    )
     if not removed:
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"deleted": True}

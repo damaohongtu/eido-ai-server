@@ -6,9 +6,9 @@
 ## 架构
 
 - **执行器**：`claude-agent-sdk` Python 包（内置原生 Claude Code CLI，无需 Node.js / npm）。
-- **多轮续接**：SDK 原生 `resume` 机制，同一 `session_id` 自动续接对话。
+- **多轮续接**：同一 `session_id` 复用 `ClaudeSDKClient`，客户端重建时按原生会话 ID `resume`。
 - **技能**：技能库挂载到会话工作区 `.claude/skills/`，由 Claude Code 原生 Skills 按需加载。
-- **MCP**：一份只读 `mcp.json` 配置全部 MCP Server，修改后下一轮请求自动生效。
+- **MCP**：一份只读 `mcp.json` 配置全部 MCP Server，新建或重建客户端时读取。
 
 ## 镜像构建（基础镜像 + 应用镜像）
 
@@ -154,7 +154,8 @@ curl -N -X POST http://localhost:8000/api/v1/chat/chat \
 `X-Trace-Id` 以串联上游请求；应用日志统一包含 `traceId` 与 `sessionId`，
 Claude 的原始执行输出会完整记录。
 
-同一 `session_id` 通过 SDK 原生 `resume` 续接对话；删除 session 时会同步回收执行状态。
+同一 `session_id` 的后续轮次复用客户端，由 Claude Code 管理对话历史。删除会话时，
+服务先结束当前执行并断开客户端，再删除工作区。
 
 ### MCP 服务
 
@@ -174,7 +175,7 @@ Server 通过一份只读 `mcp.json` 配置 MCP。默认文件：
 }
 ```
 
-修改后下一轮请求自动读取；不需要重建镜像。完整格式见
+修改后，新建或重建的客户端会读取最新配置。完整格式见
 [MCP 使用指南](docs/mcp.md)。
 
 ### 列出会话工作区文件

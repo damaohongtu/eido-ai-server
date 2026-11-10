@@ -1,9 +1,15 @@
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKError,
+    CLIConnectionError,
+    ResultError,
+)
 from claude_agent_sdk.types import (
     AssistantMessage,
     ResultMessage,
@@ -43,12 +49,13 @@ def _result(session_id: str = "cs_1") -> ResultMessage:
 
 
 class _FakeClient:
-    """替代 ClaudeSDKClient：按脚本回放 connect/query/receive_messages。"""
+    """替代 ClaudeSDKClient：按脚本回放 connect/query/receive_response。"""
 
     def __init__(self, options: ClaudeAgentOptions, spec: dict):
         self.options = options
         self.prompts: list[str] = []
         self.connect_error = spec.get("connect_error")
+        self.query_errors = list(spec.get("query_errors", []))
         self.turns: list = list(spec.get("turns", []))
         self.disconnected = False
 
@@ -57,19 +64,24 @@ class _FakeClient:
             raise self.connect_error
 
     async def query(self, prompt):
+        if self.query_errors:
+            error = self.query_errors.pop(0)
+            if error is not None:
+                raise error
         self.prompts.append(prompt)
 
-    def receive_messages(self):
-        async def gen():
-            if not self.turns:
-                return
-            turn = self.turns.pop(0)
-            if isinstance(turn, Exception):
-                raise turn
-            for message in turn:
+    async def receive_response(self):
+        if not self.turns:
+            return
+        turn = self.turns.pop(0)
+        if isinstance(turn, Exception):
+            raise turn
+        if callable(turn):
+            async for message in turn():
                 yield message
-
-        return gen()
+            return
+        for message in turn:
+            yield message
 
     async def disconnect(self):
         self.disconnected = True
@@ -301,15 +313,18 @@ def test_execute_stream_success_flow(tmp_path, monkeypatch):
     assert {"type": "content", "content": "分析完成"} in payloads
     assert payloads[-1] == {"type": "workflow_complete", "data": {"references": []}}
     assert events[-1] == "data: [DONE]\n\n"
-    assert service._claude_session_ids["sess_ok"] == "cs_run_1"
+    assert service._sessions["sess_ok"].sid == "cs_run_1"
     assert clients[0].options.resume is None
     assert clients[0].prompts == ["分析数据"]
+    assert Path(clients[0].options.cwd) == tmp_path / "workspaces" / "sess_ok"
     assert "Skill" in clients[0].options.tools
-    assert service._clients["sess_ok"].client is clients[0]
+    assert "Skill" not in clients[0].options.allowed_tools
+    assert clients[0].options.system_prompt == {"type": "preset", "preset": "claude_code"}
+    assert service._sessions["sess_ok"].client is clients[0]
     assert not clients[0].disconnected
     ws_link = tmp_path / "workspaces" / "sess_ok" / ".claude" / "skills"
     assert ws_link.is_symlink()
-    assert service._busy_sessions == set()
+    assert service._sessions["sess_ok"].turn is None
 
 
 def test_execute_stream_reuses_client_on_second_turn(tmp_path, monkeypatch):
@@ -357,11 +372,12 @@ def test_execute_stream_reuses_client_on_second_turn(tmp_path, monkeypatch):
 
 def test_execute_stream_resume_falls_back_to_fresh(tmp_path, monkeypatch):
     service = _make_service(tmp_path, monkeypatch)
-    service._claude_session_ids["sess_resume"] = "cs_stale"
+    service._sessions["sess_resume"] = agent_service._Session(sid="cs_stale")
+    error = "No conversation found with session ID: cs_stale"
     clients = _install_fake_clients(
         monkeypatch,
         [
-            {"connect_error": ClaudeSDKError("resume failed")},
+            {"connect_error": ResultError(error, data={"errors": [error]})},
             {
                 "turns": [
                     [
@@ -388,8 +404,8 @@ def test_execute_stream_resume_falls_back_to_fresh(tmp_path, monkeypatch):
     assert any("原会话已失效" in p["content"] for p in payloads if p["type"] == "thinking")
     assert {"type": "content", "content": "重建成功"} in payloads
     assert payloads[-1]["type"] == "workflow_complete"
-    assert service._claude_session_ids["sess_resume"] == "cs_new"
-    assert service._clients["sess_resume"].client is clients[1]
+    assert service._sessions["sess_resume"].sid == "cs_new"
+    assert service._sessions["sess_resume"].client is clients[1]
 
 
 def test_execute_stream_recovers_dead_client_with_resume(tmp_path, monkeypatch):
@@ -403,9 +419,8 @@ def test_execute_stream_recovers_dead_client_with_resume(tmp_path, monkeypatch):
                         AssistantMessage(content=[TextBlock(text="第一答")], model="test"),
                         _result(session_id="cs_alive"),
                     ],
-                    # 第二轮复用同一客户端时进程已死：首轮消息前抛连接错误
-                    ClaudeSDKError("cli process died mid-idle"),
-                ]
+                ],
+                "query_errors": [None, CLIConnectionError("Cannot write to terminated process")],
             },
             {
                 "turns": [
@@ -441,7 +456,7 @@ def test_execute_stream_recovers_dead_client_with_resume(tmp_path, monkeypatch):
     assert second_payloads[-1]["type"] == "workflow_complete"
     assert clients[0].disconnected, "死亡客户端应被断开回收"
     assert clients[1].options.resume == "cs_alive", "重建应带 sid 保留上下文"
-    assert service._clients["sess_dead"].client is clients[1]
+    assert service._sessions["sess_dead"].client is clients[1]
 
 
 def test_execute_stream_error_suppresses_workflow_complete(tmp_path, monkeypatch):
@@ -464,28 +479,92 @@ def test_execute_stream_error_suppresses_workflow_complete(tmp_path, monkeypatch
     assert "执行失败" in payloads[-1]["message"]
     assert not any(p["type"] == "workflow_complete" for p in payloads)
     assert events[-1] == "data: [DONE]\n\n"
-    assert service._busy_sessions == set()
-    assert "sess_err" not in service._clients, "失败轮次后应丢弃状态未知的客户端"
+    assert service._sessions["sess_err"].turn is None
+    assert service._sessions["sess_err"].client is None
     assert clients[0].disconnected
 
 
-def test_execute_stream_busy_session_rejected(tmp_path, monkeypatch):
+def test_busy_session_survives_idle_sweep_and_can_be_deleted(tmp_path, monkeypatch):
     service = _make_service(tmp_path, monkeypatch)
-    service._busy_sessions.add("sess_busy")
+    monkeypatch.setattr(service, "CLIENT_IDLE_TTL_SEC", 0)
+    monkeypatch.setattr(agent_service, "HEARTBEAT_INTERVAL_SEC", 0.01)
 
-    events = asyncio.run(
-        _collect(
-            service.execute_stream(
-                [{"role": "user", "content": "hi"}],
-                session_id="sess_busy",
-            )
+    async def run():
+        started = asyncio.Event()
+        heartbeat = asyncio.Event()
+
+        async def blocked_response():
+            started.set()
+            await asyncio.Future()
+            yield _result()
+
+        clients = _install_fake_clients(
+            monkeypatch,
+            [{"turns": [blocked_response]}, {"turns": [[_result("cs_other")]]}],
         )
+
+        async def ask(session_id):
+            frames = []
+            async for frame in service.execute_stream(
+                [{"role": "user", "content": "hi"}], session_id=session_id
+            ):
+                frames.append(frame)
+                if frame == ": ping\n\n":
+                    heartbeat.set()
+            return frames
+
+        active = asyncio.create_task(ask("sess_busy"))
+        await asyncio.wait_for(started.wait(), 2)
+        await asyncio.wait_for(heartbeat.wait(), 2)
+        rejected = await ask("sess_busy")
+        assert "正在执行中" in _payload(rejected[-2])["message"]
+
+        await ask("sess_other")
+        assert not clients[0].disconnected
+
+        assert await service.delete_session("sess_busy")
+        frames = await asyncio.wait_for(active, 2)
+        assert _payload(frames[-2]) == {"type": "error", "message": "会话执行已取消"}
+        assert frames[-1] == "data: [DONE]\n\n"
+        assert clients[0].disconnected
+        assert "sess_busy" not in service._sessions
+        assert not (tmp_path / "workspaces" / "sess_busy").exists()
+        await service.aclose()
+
+    asyncio.run(run())
+
+
+def test_execute_stream_requires_successful_sdk_result(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [
+            {"turns": [ClaudeSDKError("CLI exited after dispatch")]},
+            {"turns": [[]]},
+            {"turns": [[replace(_result(), is_error=True, errors=["provider error"])]]},
+        ],
     )
-    payloads = [_payload(e) for e in events if e.startswith("data: {")]
-    assert payloads[-1]["type"] == "error"
-    assert "正在执行中" in payloads[-1]["message"]
-    assert events[-1] == "data: [DONE]\n\n"
-    assert "sess_busy" in service._busy_sessions
+
+    async def run():
+        for index, expected_error in enumerate(
+            ("CLI exited after dispatch", "未收到执行结果", "provider error")
+        ):
+            frames = await _collect(
+                service.execute_stream(
+                    [{"role": "user", "content": "hi"}], session_id=f"sess_err_{index}"
+                )
+            )
+            assert _payload(frames[-2])["type"] == "error"
+            assert expected_error in _payload(frames[-2])["message"]
+            assert frames[-1] == "data: [DONE]\n\n"
+            assert all(
+                _payload(frame)["type"] != "workflow_complete"
+                for frame in frames[:-1]
+            )
+            assert len(clients) == index + 1, "请求提交后的失败不能自动重放"
+            assert clients[index].disconnected
+
+    asyncio.run(run())
 
 
 def test_execute_stream_reuse_skips_config_load(tmp_path, monkeypatch):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -21,7 +20,6 @@ _ENV_REF_RE = re.compile(
 class LoadedMcpConfig:
     path: Path
     servers: dict[str, dict[str, Any]]
-    revision: str
 
     @property
     def server_names(self) -> tuple[str, ...]:
@@ -63,7 +61,7 @@ def load_mcp_config(
     path that does not exist is an error so broken container mounts are visible.
     """
     if path_value is None or not str(path_value).strip():
-        return LoadedMcpConfig(Path(), {}, "")
+        return LoadedMcpConfig(Path(), {})
     resolved_environment = {**os.environ, **(environment or {})}
 
     path = Path(path_value).expanduser().resolve()
@@ -149,8 +147,4 @@ def load_mcp_config(
 
         servers[name] = server
 
-    fingerprint = json.dumps(
-        servers, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
-    revision = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
-    return LoadedMcpConfig(path, servers, revision)
+    return LoadedMcpConfig(path, servers)

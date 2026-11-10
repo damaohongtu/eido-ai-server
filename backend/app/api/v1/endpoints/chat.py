@@ -1,11 +1,12 @@
-import json
 import logging
 import uuid
+from contextlib import aclosing
 from pathlib import Path
-from typing import Any
 
+from anyio import CancelScope
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
+from starlette.types import Send
 
 from app.core.logging_context import reset_session_id, set_session_id
 from app.schemas.chat import ChatRequest
@@ -21,19 +22,14 @@ ALLOWED_EXTENSIONS = {".md", ".pdf", ".csv", ".xls", ".xlsx"}
 MAX_FILE_SIZE = 20 * 1024 * 1024
 
 
-def _parse_sse_payload(event: str) -> dict[str, Any] | None:
-    for line in event.splitlines():
-        if not line.startswith("data: "):
-            continue
-        data_str = line.removeprefix("data: ").strip()
-        if not data_str or data_str == "[DONE]":
-            return None
+class _ChatStreamResponse(StreamingResponse):
+    async def stream_response(self, send: Send) -> None:
+        # send() 被取消时，Starlette 的迭代器可能仍停在上一条 yield。
         try:
-            return json.loads(data_str)
-        except json.JSONDecodeError:
-            logger.debug("忽略无法解析的 SSE: %s", data_str)
-            return None
-    return None
+            await super().stream_response(send)
+        finally:
+            with CancelScope(shield=True):
+                await self.body_iterator.aclose()
 
 
 @router.post("/upload")
@@ -107,19 +103,18 @@ async def chat_completion(request: ChatRequest, raw_request: Request):
         async def stream():
             stream_session_token = set_session_id(request.session_id)
             try:
-                async for event in svc.execute_stream(
+                events = svc.execute_stream(
                     request.messages,
                     request.context,
                     session_id=request.session_id,
-                ):
-                    yield event
-            except Exception as e:
-                logger.error(f"流式执行异常: {e}", exc_info=True)
-                raise
+                )
+                async with aclosing(events):
+                    async for event in events:
+                        yield event
             finally:
                 reset_session_id(stream_session_token)
 
-        return StreamingResponse(stream(), media_type="text/event-stream")
+        return _ChatStreamResponse(stream(), media_type="text/event-stream")
 
     except HTTPException:
         raise
