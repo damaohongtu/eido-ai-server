@@ -1,8 +1,7 @@
-"""Load one read-only MCP config for Claude Code and OpenCode runtimes."""
+"""Load one read-only MCP config for the Claude Code runtime."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -20,13 +19,11 @@ _ENV_REF_RE = re.compile(
 @dataclass(frozen=True)
 class LoadedMcpConfig:
     path: Path
-    claude_servers: dict[str, dict[str, Any]]
-    opencode_servers: dict[str, dict[str, Any]]
-    revision: str
+    servers: dict[str, dict[str, Any]]
 
     @property
     def server_names(self) -> tuple[str, ...]:
-        return tuple(sorted(self.claude_servers))
+        return tuple(sorted(self.servers))
 
 
 def _resolve_env(value: object, *, field: str, environment: dict[str, str]) -> str:
@@ -64,7 +61,7 @@ def load_mcp_config(
     path that does not exist is an error so broken container mounts are visible.
     """
     if path_value is None or not str(path_value).strip():
-        return LoadedMcpConfig(Path(), {}, {}, "")
+        return LoadedMcpConfig(Path(), {})
     resolved_environment = {**os.environ, **(environment or {})}
 
     path = Path(path_value).expanduser().resolve()
@@ -86,8 +83,7 @@ def load_mcp_config(
     if len(raw_servers) > 64:
         raise ValueError("MCP Server 不能超过 64 个")
 
-    claude_servers: dict[str, dict[str, Any]] = {}
-    opencode_servers: dict[str, dict[str, Any]] = {}
+    servers: dict[str, dict[str, Any]] = {}
     for name, raw in raw_servers.items():
         if not isinstance(name, str) or not _SERVER_NAME_RE.fullmatch(name):
             raise ValueError(
@@ -123,22 +119,9 @@ def load_mcp_config(
                 field=f"{name}.env",
                 environment=resolved_environment,
             )
-            claude = {"type": "stdio", "command": command, "args": args}
+            server: dict[str, Any] = {"type": "stdio", "command": command, "args": args}
             if env:
-                claude["env"] = env
-            opencode: dict[str, Any] = {
-                "type": "local",
-                "command": [command, *args],
-                "enabled": True,
-            }
-            if env:
-                opencode["environment"] = env
-            if raw.get("cwd") is not None:
-                opencode["cwd"] = _resolve_env(
-                    raw["cwd"],
-                    field=f"{name}.cwd",
-                    environment=resolved_environment,
-                )
+                server["env"] = env
         elif transport in {"http", "sse", "streamable-http"}:
             url = _resolve_env(
                 raw.get("url"),
@@ -153,56 +136,15 @@ def load_mcp_config(
                 field=f"{name}.headers",
                 environment=resolved_environment,
             )
-            claude_type = "sse" if transport == "sse" else "http"
-            claude = {"type": claude_type, "url": url}
+            server = {"type": "sse" if transport == "sse" else "http", "url": url}
             if headers:
-                claude["headers"] = headers
-            opencode = {"type": "remote", "url": url, "enabled": True}
-            if headers:
-                opencode["headers"] = headers
-            if "oauth" in raw:
-                opencode["oauth"] = raw["oauth"]
+                server["headers"] = headers
         else:
             raise ValueError(
                 f"MCP Server {name!r} type={transport!r} 不受支持；"
                 "可选 stdio/http/sse/streamable-http"
             )
 
-        claude_servers[name] = claude
-        opencode_servers[name] = opencode
+        servers[name] = server
 
-    fingerprint = json.dumps(
-        {"claude": claude_servers, "opencode": opencode_servers},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    revision = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
-    return LoadedMcpConfig(path, claude_servers, opencode_servers, revision)
-
-
-def merge_opencode_mcp_config(
-    inline_content: str, servers: dict[str, dict[str, Any]]
-) -> str:
-    """Merge canonical MCP servers into OpenCode's inline JSON config."""
-    if inline_content.strip():
-        try:
-            config = json.loads(inline_content)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                "OPENCODE_CONFIG_CONTENT 必须是有效 JSON，才能与 MCP_CONFIG_PATH 合并"
-            ) from exc
-        if not isinstance(config, dict):
-            raise ValueError("OPENCODE_CONFIG_CONTENT 根节点必须是对象")
-    else:
-        config = {}
-    if servers:
-        existing = config.get("mcp", {})
-        if existing is None:
-            existing = {}
-        if not isinstance(existing, dict):
-            raise ValueError("OpenCode 配置中的 mcp 必须是对象")
-        config["mcp"] = {**existing, **servers}
-    return (
-        json.dumps(config, ensure_ascii=False, separators=(",", ":")) if config else ""
-    )
+    return LoadedMcpConfig(path, servers)

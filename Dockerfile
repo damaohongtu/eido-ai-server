@@ -1,37 +1,10 @@
-ARG REGISTRY=docker.io
-FROM ${REGISTRY}/python:3.12-slim
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-    sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl \
-      ca-certificates \
-      supervisor \
-      fonts-noto-cjk \
-      fonts-wqy-zenhei \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN npm install -g @anthropic-ai/claude-code@2.1.218 opencode-ai --registry https://registry.npmmirror.com
-
-RUN fc-cache -fv
+ARG BASE_IMAGE=eido-base:latest
+FROM ${BASE_IMAGE}
 
 WORKDIR /app
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    -i https://mirrors.aliyun.com/pypi/simple/ \
-    --trusted-host mirrors.aliyun.com
-
 COPY backend/ .
+# 占位默认配置；运行时通过 bind mount 覆盖（compose 挂载 ${MCP_CONFIG_FILE:-./mcp.json}）
 COPY mcp.json /etc/eido/mcp.json
-
-COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 RUN mkdir -p /workspace/.claude/skills /var/log/eido
 
@@ -39,9 +12,8 @@ ENV WORKSPACE_ROOT=/workspace
 ENV SKILLS_DIR=/workspace/.claude/skills
 ENV LOG_DIR=/var/log/eido
 ENV EIDO_DATA_ROOT=/workspace/.eido
-ENV XDG_DATA_HOME=/workspace/.eido/opencode-data
 ENV MCP_CONFIG_PATH=/etc/eido/mcp.json
 
 EXPOSE 8000
 
-CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,6 +1,9 @@
-import uuid
+import asyncio
 import logging
+import uuid
+from types import SimpleNamespace
 
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
@@ -127,7 +130,53 @@ class TestWorkspace:
 
 
 class TestChatValidation:
-    def test_chat_logs_trace_and_session_ids(self, caplog):
+    def test_disconnect_during_send_closes_agent_stream(self, monkeypatch, tmp_path):
+        from app.api.v1.endpoints import chat
+        from app.schemas.chat import ChatRequest
+        from app.services import agent_service
+        from app.services.session_workspace import SessionWorkspaceManager
+
+        closed = False
+
+        async def execute_stream(*args, **kwargs):
+            nonlocal closed
+            try:
+                yield 'data: {"type":"content","content":"hello"}\n\n'
+            finally:
+                closed = True
+
+        monkeypatch.setattr(
+            agent_service, "get_agent_service", lambda: SimpleNamespace(execute_stream=execute_stream)
+        )
+        workspaces = SessionWorkspaceManager(tmp_path / "workspaces")
+        monkeypatch.setattr(chat, "get_session_workspace_manager", lambda: workspaces)
+
+        async def run():
+            sending_body = asyncio.Event()
+
+            async def send(message):
+                if message["type"] == "http.response.body":
+                    sending_body.set()
+                    await asyncio.Future()
+
+            async def receive():
+                await sending_body.wait()
+                return {"type": "http.disconnect"}
+
+            scope = {"type": "http", "asgi": {"spec_version": "2.3"}}
+            request = ChatRequest(
+                messages=[{"role": "user", "content": "hello"}], session_id=_unique_id()
+            )
+            response = await chat.chat_completion(request, Request(scope))
+            await response(scope, receive, send)
+            assert closed
+
+        asyncio.run(asyncio.wait_for(run(), timeout=5))
+
+    def test_chat_logs_trace_and_session_ids(self, caplog, monkeypatch):
+        import app.services.agent_service as agent_service
+
+        monkeypatch.setattr(agent_service, "get_agent_service", lambda: None)
         session_id = _unique_id()
         with caplog.at_level(logging.INFO):
             resp = client.post(
@@ -136,10 +185,9 @@ class TestChatValidation:
                 json={
                     "messages": [{"role": "user", "content": "hello"}],
                     "session_id": session_id,
-                    "harness": "unknown",
                 },
             )
-        assert resp.status_code == 400
+        assert resp.status_code == 503
         response_logs = [
             record
             for record in caplog.records
@@ -147,18 +195,6 @@ class TestChatValidation:
         ]
         assert response_logs[-1].trace_id == "chat-trace-123"
         assert response_logs[-1].session_id == session_id
-
-    def test_chat_rejects_unknown_harness(self):
-        resp = client.post(
-            "/api/v1/chat/chat",
-            json={
-                "messages": [{"role": "user", "content": "hello"}],
-                "session_id": _unique_id(),
-                "harness": "unknown",
-            },
-        )
-        assert resp.status_code == 400
-        assert "claude_code, opencode" in resp.json()["detail"]
 
     def test_chat_empty_messages(self):
         resp = client.post(

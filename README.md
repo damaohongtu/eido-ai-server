@@ -1,32 +1,42 @@
 # Eido AI Server
 
-基于 FastAPI 的 AI 对话与技能执行服务，支持 Docker 部署与会话工作区隔离。
+基于 FastAPI 的 AI 对话与技能执行服务。执行器为 Claude Agent SDK（内置 Claude Code CLI），
+支持 Docker 部署与会话工作区隔离，通过 Anthropic 兼容端点连接任意 Model Provider。
 
-## 快速启动（docker-compose.yml）
+## 架构
 
-### 1. 构建镜像
+- **执行器**：`claude-agent-sdk` Python 包（内置原生 Claude Code CLI，无需 Node.js / npm）。
+- **多轮续接**：同一 `session_id` 复用 `ClaudeSDKClient`，客户端重建时按原生会话 ID `resume`。
+- **技能**：技能库挂载到会话工作区 `.claude/skills/`，由 Claude Code 原生 Skills 按需加载。
+- **MCP**：一份只读 `mcp.json` 配置全部 MCP Server，新建或重建客户端时读取。
+
+## 镜像构建（基础镜像 + 应用镜像）
+
+基础镜像包含 OS 依赖与 Python 依赖，与代码分离，代码变更时无需重建：
 
 ```bash
+# 1. 构建基础镜像（仅依赖变更时需要重建）
+docker build -f Dockerfile.base -t eido-base:latest .
+
+# 2. 构建应用镜像（代码变更时重建）
 docker build -f Dockerfile -t eido-server:latest .
 ```
 
-### 2. 准备目录与环境变量
+## 快速启动
+
+### 1. 准备目录与环境变量
 
 ```bash
-mkdir -p .claude/skills logs .eido/workspaces .eido/opencode-data
+mkdir -p .claude/skills logs .eido/workspaces
 cp mcp.json mcp.local.json
 
-# 必填：Anthropic 兼容 API（直连或自建代理）
+# 必填：Anthropic 兼容端点与凭据
 export ANTHROPIC_BASE_URL=https://api.anthropic.com
 export ANTHROPIC_API_KEY=your-api-key
 # 或使用 auth token
 # export ANTHROPIC_AUTH_TOKEN=your-token
 
 export ANTHROPIC_MODEL=claude-sonnet-4-6
-export AGENT_HARNESS=claude_code
-export MCP_CONFIG_FILE=./mcp.local.json
-# 可选：AGENT_HARNESS=opencode 时指定 provider/model
-# export OPENCODE_MODEL=anthropic/claude-sonnet-4-6
 
 # 可选
 export EIDO_PORT=8000
@@ -35,63 +45,27 @@ export LOG_DIR=./logs
 export EIDO_DATA_DIR=./.eido
 ```
 
-### 3. 启动服务
+### 2. 启动服务
 
 ```bash
 docker compose up -d
 ```
 
-### 4. 查看状态与日志
+### 3. 查看状态与日志
 
 ```bash
 docker compose ps
 docker compose logs -f
 ```
 
-### docker-compose.yml 完整示例
-
-```yaml
-services:
-  eido:
-    image: eido-server:latest
-    container_name: eido-server
-    restart: unless-stopped
-    ports:
-      - "${EIDO_PORT:-8000}:8000"
-    environment:
-      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
-      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}
-      - ANTHROPIC_SMALL_FAST_MODEL=${ANTHROPIC_SMALL_FAST_MODEL:-}
-      - API_TIMEOUT_MS=${API_TIMEOUT_MS:-300000}
-      - EIDO_DATA_ROOT=/workspace/.eido
-      - MCP_CONFIG_PATH=/etc/eido/mcp.json
-      - AGENT_HARNESS=${AGENT_HARNESS:-claude_code}
-      - OPENCODE_MODEL=${OPENCODE_MODEL:-}
-      - OPENCODE_CONFIG=${OPENCODE_CONFIG:-}
-      - OPENCODE_CONFIG_CONTENT=${OPENCODE_CONFIG_CONTENT:-}
-    volumes:
-      - ${SKILLS_DIR:-./.claude/skills}:/workspace/.claude/skills:ro
-      - ${LOG_DIR:-./logs}:/var/log/eido
-      - ${EIDO_DATA_DIR:-./.eido}:/workspace/.eido
-      - ${MCP_CONFIG_FILE:-./mcp.json}:/etc/eido/mcp.json:ro
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-```
-
-宿主机目录映射说明：
+### 宿主机目录映射说明
 
 | 宿主机路径 | 容器路径 | 用途 |
 |-----------|----------|------|
 | `./logs` | `/var/log/eido` | 应用日志 |
-| `./.eido` | `/workspace/.eido` | 会话工作区及持久化 OpenCode 凭据/数据 |
+| `./.eido` | `/workspace/.eido` | 会话工作区 |
 | `./.claude/skills` | `/workspace/.claude/skills` | 技能定义（只读） |
-| `./mcp.json` | `/etc/eido/mcp.json` | Claude Code/OpenCode 共用 MCP 配置（只读） |
+| `./mcp.json` | `/etc/eido/mcp.json` | MCP 配置（只读） |
 
 ---
 
@@ -160,7 +134,7 @@ curl -N -X POST http://localhost:8000/api/v1/chat/chat \
   }"
 ```
 
-带技能上下文或流水线 `context` 字段：
+带流水线 `context` 字段：
 
 ```bash
 curl -N -X POST http://localhost:8000/api/v1/chat/chat \
@@ -170,69 +144,22 @@ curl -N -X POST http://localhost:8000/api/v1/chat/chat \
     \"messages\": [
       {\"role\": \"user\", \"content\": \"根据上传的财报继续分析\"}
     ],
-    \"context\": \"上一步技能输出的摘要...\",
-    \"harness\": \"claude_code\"
+    \"context\": \"上一步技能输出的摘要...\"
   }"
 ```
 
 响应为 SSE（`text/event-stream`），每行形如 `data: {"type":"content",...}`，结束为 `data: [DONE]`。
 
-`harness` 支持 `claude_code`、`opencode`。不传时使用
-`AGENT_HARNESS`。同一 `session_id` 会复用 Claude Code 子进程或续接 OpenCode
-原生会话；删除 session 时会同步回收对应执行状态。
-
 每个 HTTP 响应都会返回 `X-Trace-Id`。也可以由调用方传入合法的
 `X-Trace-Id` 以串联上游请求；应用日志统一包含 `traceId` 与 `sessionId`，
-Claude/OpenCode 的原始执行输出会完整记录（超长 OpenCode 输出按有序日志块拆分，
-不会丢失尾部内容）。
+Claude 的原始执行输出会完整记录。
 
-### Agent 运行时版本与效率
-
-- Claude Code CLI：`2.1.218`（Docker 固定版本，Node.js 22）。
-- Claude Agent SDK：`0.2.126`。
-- 同一 session 使用长生命周期 `ClaudeSDKClient`，避免每轮重启 Claude Code。
-- session 技能映射到原生 `.claude/skills/`，由 `Skill` 工具按需加载。
-- 关闭未消费的 partial-message 流，并缓存技能目录扫描结果。
-- OpenCode CLI 随镜像安装；可通过 `OPENCODE_MODEL=provider/model` 选择模型。
-
-### OpenCode 快速使用
-
-本机先完成 Provider 认证并选择模型：
-
-```bash
-opencode auth login
-opencode auth list
-opencode models
-
-export AGENT_HARNESS=opencode
-export OPENCODE_MODEL=zai/glm-5.1
-```
-
-请求中可以显式指定：
-
-```json
-{
-  "session_id": "a1b2c3d4e5f6",
-  "messages": [
-    {"role": "user", "content": "分析 uploads 中的文件，将报告写到 outputs/report.html"}
-  ],
-  "harness": "opencode"
-}
-```
-
-Docker 可使用持久化到 `.eido/opencode-data` 的交互式认证：
-
-```bash
-docker compose run --rm eido opencode auth login
-docker compose run --rm eido opencode auth list
-```
-
-完整配置、Docker/本机认证、会话续接、文件处理、日志和故障排查见
-[OpenCode 使用指南](docs/opencode.md)。
+同一 `session_id` 的后续轮次复用客户端，由 Claude Code 管理对话历史。删除会话时，
+服务先结束当前执行并断开客户端，再删除工作区。
 
 ### MCP 服务
 
-Server 版本通过一份只读 `mcp.json` 同时配置 Claude Code 与 OpenCode。默认文件：
+Server 通过一份只读 `mcp.json` 配置 MCP。默认文件：
 
 ```json
 {
@@ -248,7 +175,7 @@ Server 版本通过一份只读 `mcp.json` 同时配置 Claude Code 与 OpenCode
 }
 ```
 
-修改后下一轮请求自动读取；不需要重建镜像。完整格式、容器网络和调用方法见
+修改后，新建或重建的客户端会读取最新配置。完整格式见
 [MCP 使用指南](docs/mcp.md)。
 
 ### 列出会话工作区文件
@@ -320,10 +247,5 @@ DRY_RUN=1 ./scripts/cleanup-sessions.sh
 ```
 
 ---
-
-## 其他部署方式
-
-- **内置 LiteLLM 代理**：`docker compose -f docker-compose.litellm.yml up -d`（需先 `docker build -f Dockerfile.litellm -t eido-server-litellm:latest .`）
-- **脚本启动**：`./appctl.sh`（见 `appctl.sh --help`）
 
 后端开发说明见 [backend/README.md](backend/README.md)。

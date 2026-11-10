@@ -1,6 +1,6 @@
 # Eido Backend
 
-基于 FastAPI 的后端服务，提供技能执行、普通对话和技能管理 API。
+基于 FastAPI 的后端服务，通过 Claude Agent SDK 执行技能与对话，以 SSE 流式返回。
 
 ---
 
@@ -13,20 +13,19 @@ backend/
 │   ├── api/v1/
 │   │   ├── api.py                  # 路由注册
 │   │   └── endpoints/
-│   │       ├── chat.py             # POST /chat/chat — 对话与技能执行
-│   │       ├── skills.py           # GET  /skills/   — 技能列表与详情
-│   │       └── workflow.py         # 健康检查
+│   │       ├── chat.py             # POST /chat/chat、/chat/upload
+│   │       ├── sessions.py         # 会话 CRUD
+│   │       └── workspace.py        # 工作区文件管理
 │   ├── core/
-│   │   └── config.py               # Pydantic Settings（读取 .env）
+│   │   ├── config.py               # Pydantic Settings（读取 .env）
+│   │   └── mcp_config.py           # 只读 MCP 配置加载与校验
 │   ├── schemas/
 │   │   └── chat.py                 # 请求/响应 Pydantic 模型
 │   └── services/
-│       ├── claude_skill_service.py # Claude SDK 长连接、原生 Skills 与 SSE
-│       ├── open_code_service.py    # OpenCode CLI、原生会话续接与 SSE
+│       ├── agent_service.py         # Claude Agent SDK 执行与 SSE
 │       └── session_workspace.py    # 单次会话工作区隔离
-├── alembic/                        # 数据库迁移（保留备用）
-├── scripts/                        # 辅助脚本
-├── requirements.txt
+├── requirements.txt                # 运行时依赖（进基础镜像）
+├── requirements-dev.txt            # 开发/测试依赖
 ├── run.py                          # 开发启动入口
 └── .env.example                    # 环境变量模板
 ```
@@ -36,11 +35,9 @@ backend/
 ## 快速启动
 
 ```bash
-conda activate eido
-cd backend
-
-# 首次安装依赖
-pip install -r requirements.txt
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements-dev.txt
 
 # 配置环境变量
 cp .env.example .env
@@ -51,8 +48,15 @@ python run.py
 ```
 
 服务启动后：
+
 - API 文档（Swagger）：http://localhost:8000/api/v1/docs
 - 健康检查：http://localhost:8000/health
+
+### 运行测试
+
+```bash
+python -m pytest ../tests
+```
 
 ---
 
@@ -60,17 +64,18 @@ python run.py
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `ANTHROPIC_API_KEY` | Claude Agent SDK API Key | 必填* |
+| `ANTHROPIC_BASE_URL` | Anthropic 兼容端点 | 空（官方端点） |
+| `ANTHROPIC_API_KEY` | API Key | 必填* |
+| `ANTHROPIC_AUTH_TOKEN` | Auth Token（与 API_KEY 二选一） | 空 |
 | `ANTHROPIC_MODEL` | Claude 模型 | provider 默认值 |
-| `AGENT_HARNESS` | `claude_code` / `opencode` | `claude_code` |
-| `MCP_CONFIG_PATH` | 统一 MCP JSON 文件路径 | `{workspace}/mcp.json` |
-| `OPENCODE_MODEL` | OpenCode 可选模型，格式 `provider/model` | OpenCode 默认值 |
-| `OPENCODE_CONFIG` | OpenCode JSON/JSONC 配置文件绝对路径 | 空 |
-| `OPENCODE_CONFIG_CONTENT` | OpenCode JSON 配置；Docker 中可用于 provider 认证 | 空 |
-| `EIDO_DATA_ROOT` | 会话和隔离的 OpenCode 数据根目录 | `{workspace}/.eido` |
+| `ANTHROPIC_SMALL_FAST_MODEL` | 小模型 | provider 默认值 |
+| `API_TIMEOUT_MS` | API 超时 | `300000` |
+| `MCP_CONFIG_PATH` | MCP JSON 文件路径；空表示禁用 MCP | `{workspace}/mcp.json` |
+| `EIDO_DATA_ROOT` | 会话工作区数据根目录 | `{workspace}/.eido` |
 | `SKILLS_DIR` | 技能目录路径 | `{workspace}/.claude/skills` |
 | `WORKSPACE_ROOT` | 工作区根路径（传给 claude_agent_sdk） | 自动推断 |
 | `LOG_LEVEL` | 日志级别 | `INFO` |
+| `LOG_DIR` | 日志目录 | `logs` |
 
 ---
 
@@ -78,7 +83,7 @@ python run.py
 
 ### POST `/api/v1/chat/chat`
 
-统一对话入口，通过 `harness` 选择执行内核。
+统一对话入口，执行器为 Claude Agent SDK。
 
 ```json
 {
@@ -86,13 +91,9 @@ python run.py
   "messages": [
     {"role": "user", "content": "@A股财报点评 分析中望软件2024年报"}
   ],
-  "context": "（可选）上一步技能的输出，用于多技能流水线",
-  "harness": "claude_code"
+  "context": "（可选）上一步技能的输出，用于多技能流水线"
 }
 ```
-
-`harness` 可选 `claude_code`、`opencode`；不传时使用
-`AGENT_HARNESS`。响应固定为 SSE 流。
 
 响应为 SSE 流，事件类型：
 
@@ -101,39 +102,24 @@ python run.py
 | `thinking` | 执行状态提示 |
 | `workflow_start` | 技能开始执行 |
 | `content` | 正文增量内容 |
-| `tool_use` | 工具调用信息 |
 | `workflow_complete` | 执行完成 |
 | `error` | 执行错误 |
 
-## 技能服务（ClaudeSkillService）
+## Agent 服务（AgentService）
 
-核心服务位于 `app/services/claude_skill_service.py`：
+核心服务位于 `app/services/agent_service.py`：
 
-- **`scan_skills()`** — 扫描 `SKILLS_DIR`，解析每个子目录的 `SKILL.md` frontmatter
-- **`get_skill(skill_id)`** — 按目录名加载单个技能
-- **`execute_stream(messages, context, session_id=...)`** — 优先复用 session 级 `ClaudeSDKClient`，以 SSE 格式流式返回
-
-首轮由 Claude Code 原生 Skills 按需加载技能，并带入既有历史；续轮依赖原生
-session，只发送最新用户请求。SDK、工具和 OpenCode 原始输出均完整写入带
-`traceId`、`sessionId` 的日志。
-
-## OpenCodeService
-
-`app/services/open_code_service.py` 通过 OpenCode CLI 的 JSON 流接入统一 SSE：
-
-- 请求指定 `"harness": "opencode"`，或配置 `AGENT_HARNESS=opencode`。
-- 模型使用 `OPENCODE_MODEL=provider/model`；生产环境建议显式设置。
-- 本机凭据可通过 `opencode auth login` 配置，并用 `opencode auth list` 检查。
-- 同一 Eido `session_id` 在服务进程存活期间续接对应 OpenCode 原生 session。
-- OpenCode 工作目录固定为当前会话工作区，读取 `uploads/`、写入 `outputs/`。
-- 原始 NDJSON、推理、正文、工具输入/输出和执行汇总均完整写入日志。
-
-完整操作步骤及排障说明见 [OpenCode 使用指南](../docs/opencode.md)。
+- **`execute_stream(messages, context, session_id=...)`** 使用 `ClaudeSDKClient.query()`
+  提交提示，通过 `receive_response()` 接收单轮响应并转换成现有 SSE 事件。
+- **多轮续接**：同一会话复用客户端。客户端被回收后，服务使用内存中记录的原生会话
+  ID `resume`。Claude Code 确认旧会话不存在时，服务会新建会话。
+- **技能加载**：`SKILLS_DIR` 以目录符号链接挂到会话工作区 `.claude/skills/`，
+  由 Claude Code 原生 Skills 机制按需加载，无需扫描解析。
+- **并发保护**：同一会话同时只执行一轮。删除会话时先取消执行并断开客户端，再移除工作区。
+- SDK 消息（正文、推理、工具输入/输出、执行汇总）均完整写入带
+  `traceId`、`sessionId` 的日志。
 
 ## MCP 配置
 
-Claude Code 和 OpenCode 共用 `MCP_CONFIG_PATH` 指向的标准
-`{"mcpServers": {...}}` JSON。每轮执行前重新读取；Claude 客户端池会在配置修订
-变化时重建，OpenCode 则将配置转换为其原生 `mcp` 节点。
-
-完整说明见 [MCP 使用指南](../docs/mcp.md)。
+`MCP_CONFIG_PATH` 指向标准 `{"mcpServers": {...}}` JSON。配置在创建客户端时读取，
+由该客户端的后续轮次复用。完整说明见 [MCP 使用指南](../docs/mcp.md)。
