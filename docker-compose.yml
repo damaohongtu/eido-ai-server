@@ -15,6 +15,7 @@ services:
       - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}
       - EIDO_DATA_ROOT=/workspace/.eido
       - EIDO_AGENT_NAME=${EIDO_AGENT_NAME:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MCP_CONFIG_PATH=/etc/eido/mcp.json
     volumes:
       - ${SKILLS_DIR:-./.claude/skills}:/workspace/.claude/skills:ro

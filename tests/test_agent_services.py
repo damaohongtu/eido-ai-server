@@ -172,13 +172,20 @@ def test_build_prompt_passthrough_with_context(tmp_path):
     assert "x" * 9000 in untruncated
 
 
-def test_claude_sdk_logging_keeps_complete_content(tmp_path, caplog):
+def test_claude_sdk_logging_keeps_complete_content_at_debug(tmp_path, caplog):
     service = AgentService(tmp_path / "skills", tmp_path)
     tail = "完整日志结尾"
     message = AssistantMessage(
         content=[TextBlock(text="x" * 9000 + tail)], model="test"
     )
     with caplog.at_level(logging.INFO, logger="app.services.agent_service"):
+        service._log_message(message)
+        service._log_message(_result())
+    assert len(caplog.records) == 1
+    assert "[Result/OK]" in caplog.records[0].getMessage()
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="app.services.agent_service"):
         service._log_message(message)
     messages = [
         record.getMessage()

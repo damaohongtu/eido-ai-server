@@ -222,7 +222,7 @@ Server 名称和用途。
 grep 'traceId=mcp-claude-test' logs/app.log
 ```
 
-关键日志：
+启动时记录 MCP 配置。设置 `LOG_LEVEL=DEBUG` 可以查看客户端加载的配置和工具调用。
 
 ```text
 ✓ MCP 配置已加载: path=/etc/eido/mcp.json servers=research

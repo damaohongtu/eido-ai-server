@@ -18,12 +18,14 @@ def _unique_id() -> str:
 
 class TestHealthAndRoot:
 
-    def test_health(self):
-        resp = client.get("/health")
+    def test_health(self, caplog):
+        with caplog.at_level(logging.INFO, logger="app.main"):
+            resp = client.get("/health")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "healthy"
         assert "version" in data
+        assert not any(record.name == "app.main" for record in caplog.records)
 
     def test_root(self):
         resp = client.get("/")

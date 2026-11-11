@@ -151,8 +151,8 @@ curl -N -X POST http://localhost:8000/api/v1/chat/chat \
 响应为 SSE（`text/event-stream`），每行形如 `data: {"type":"content",...}`，结束为 `data: [DONE]`。
 
 每个 HTTP 响应都会返回 `X-Trace-Id`。也可以由调用方传入合法的
-`X-Trace-Id` 以串联上游请求；应用日志统一包含 `traceId` 与 `sessionId`，
-Claude 的原始执行输出会完整记录。
+`X-Trace-Id` 以串联上游请求。默认日志记录请求结果和 Claude 单轮执行摘要，
+并附带 `traceId` 与 `sessionId`。需要查看 Claude 原始消息时，可设置 `LOG_LEVEL=DEBUG`。
 
 同一 `session_id` 的后续轮次复用客户端，由 Claude Code 管理对话历史。删除会话时，
 服务先结束当前执行并断开客户端，再删除工作区。

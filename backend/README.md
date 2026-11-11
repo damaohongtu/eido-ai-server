@@ -116,8 +116,8 @@ python -m pytest ../tests
 - **技能加载**：`SKILLS_DIR` 以目录符号链接挂到会话工作区 `.claude/skills/`，
   由 Claude Code 原生 Skills 机制按需加载，无需扫描解析。
 - **并发保护**：同一会话同时只执行一轮。删除会话时先取消执行并断开客户端，再移除工作区。
-- SDK 消息（正文、推理、工具输入/输出、执行汇总）均完整写入带
-  `traceId`、`sessionId` 的日志。
+- 默认日志记录执行状态、耗时和用量，附带 `traceId` 与 `sessionId`。
+  设置 `LOG_LEVEL=DEBUG` 可查看 SDK 原始消息和工具输入输出。
 
 ## MCP 配置
 

@@ -44,7 +44,7 @@ console_handler.addFilter(trace_id_filter)
 file_handler = TimedRotatingFileHandler(
     log_dir / "app.log", when="midnight", backupCount=7, encoding="utf-8"
 )
-file_handler.setLevel(logging.INFO)
+file_handler.setLevel(settings.LOG_LEVEL)
 file_handler.setFormatter(detailed_formatter)
 file_handler.addFilter(trace_id_filter)
 file_handler.suffix = "%Y-%m-%d"
@@ -69,10 +69,6 @@ async def lifespan(app: FastAPI):
     from app.services.agent_service import init_agent_service
     from app.services.session_workspace import get_session_workspace_manager
 
-    logger.info("=" * 60)
-    logger.info("启动为单租户模式")
-    logger.info("=" * 60)
-
     skills_dir = Path(settings.SKILLS_DIR)
     workspace_root = Path(settings.WORKSPACE_ROOT)
 
@@ -93,13 +89,11 @@ async def lifespan(app: FastAPI):
 
     try:
         init_agent_service(skills_dir, workspace_root)
-        logger.info("✓ AgentService 初始化完成")
     except Exception as e:
         logger.error(f"✗ AgentService 初始化失败: {e}", exc_info=True)
 
     try:
-        ws = get_session_workspace_manager()
-        logger.info(f"✓ 会话工作区根目录: {ws.root}")
+        get_session_workspace_manager()
     except Exception as e:
         logger.error(f"✗ 会话工作区初始化失败: {e}", exc_info=True)
 
@@ -135,24 +129,30 @@ def create_application() -> FastAPI:
         allow_headers=["*"],
     )
 
+    health_paths = {"/health", f"{settings.API_V1_STR}/chat/health"}
+
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
-        start_time = time.time()
+        start_time = time.perf_counter()
+        path = request.url.path
         trace_id = resolve_trace_id(request.headers.get(TRACE_ID_HEADER))
         trace_token = set_trace_id(trace_id)
         request.state.trace_id = trace_id
         try:
-            logger.info("→ %s %s", request.method, request.url.path)
             response = await call_next(request)
             response.headers[TRACE_ID_HEADER] = trace_id
             session_token = set_session_id(getattr(request.state, "session_id", "-"))
             try:
-                logger.info(
+                successful_probe = (
+                    request.method == "GET" and path in health_paths and response.status_code == 200
+                )
+                logger.log(
+                    logging.DEBUG if successful_probe else logging.INFO,
                     "← %s %s Status: %s Duration: %.3fs",
                     request.method,
-                    request.url.path,
+                    path,
                     response.status_code,
-                    time.time() - start_time,
+                    time.perf_counter() - start_time,
                 )
             finally:
                 reset_session_id(session_token)
@@ -163,8 +163,8 @@ def create_application() -> FastAPI:
                 logger.exception(
                     "← %s %s Status: 500 Duration: %.3fs",
                     request.method,
-                    request.url.path,
-                    time.time() - start_time,
+                    path,
+                    time.perf_counter() - start_time,
                 )
             finally:
                 reset_session_id(session_token)
