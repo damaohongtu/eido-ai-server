@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     WORKSPACE_ROOT: str = str(_WORKSPACE_ROOT)
 
     EIDO_DATA_ROOT: str = ""
+    EIDO_AGENT_NAME: str = ""
 
     ANTHROPIC_BASE_URL: str = ""
     ANTHROPIC_API_KEY: SecretStr = SecretStr("")
@@ -60,6 +61,14 @@ class Settings(BaseSettings):
         if isinstance(v, str) and not v.strip():
             return False
         return v
+
+    @field_validator("EIDO_AGENT_NAME")
+    @classmethod
+    def _validate_agent_name(cls, name: str) -> str:
+        name = name.strip()
+        if name and (not name.isascii() or not name.isprintable()):
+            raise ValueError("EIDO_AGENT_NAME must use printable ASCII characters")
+        return name
 
     @property
     def data_root(self) -> Path:

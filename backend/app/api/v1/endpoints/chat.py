@@ -89,15 +89,6 @@ async def chat_completion(request: ChatRequest, raw_request: Request):
         if svc is None:
             raise HTTPException(status_code=503, detail="Agent 服务未初始化")
 
-        logger.info(
-            f"[session={request.session_id}] 聊天请求 - 消息数: {len(request.messages)}"
-            + (
-                f" [含流水线上下文 {len(request.context)} 字符]"
-                if request.context
-                else ""
-            )
-        )
-
         get_session_workspace_manager().session_root(request.session_id)
 
         async def stream():

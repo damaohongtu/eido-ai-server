@@ -172,13 +172,20 @@ def test_build_prompt_passthrough_with_context(tmp_path):
     assert "x" * 9000 in untruncated
 
 
-def test_claude_sdk_logging_keeps_complete_content(tmp_path, caplog):
+def test_claude_sdk_logging_keeps_complete_content_at_debug(tmp_path, caplog):
     service = AgentService(tmp_path / "skills", tmp_path)
     tail = "完整日志结尾"
     message = AssistantMessage(
         content=[TextBlock(text="x" * 9000 + tail)], model="test"
     )
     with caplog.at_level(logging.INFO, logger="app.services.agent_service"):
+        service._log_message(message)
+        service._log_message(_result())
+    assert len(caplog.records) == 1
+    assert "[Result/OK]" in caplog.records[0].getMessage()
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="app.services.agent_service"):
         service._log_message(message)
     messages = [
         record.getMessage()
@@ -329,6 +336,11 @@ def test_execute_stream_success_flow(tmp_path, monkeypatch):
 
 def test_execute_stream_reuses_client_on_second_turn(tmp_path, monkeypatch):
     service = _make_service(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "EIDO_AGENT_NAME", "eido-worker")
+    monkeypatch.setenv(
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "X-Client: eido\nLangfuse_Session_Id: old-session\nLangfuse_Trace_User_Id: old-user",
+    )
     clients = _install_fake_clients(
         monkeypatch,
         [
@@ -368,6 +380,11 @@ def test_execute_stream_reuses_client_on_second_turn(tmp_path, monkeypatch):
     assert second_payloads[-1]["type"] == "workflow_complete"
     assert len(clients) == 1, "第二轮应复用常驻客户端，不再新建进程"
     assert clients[0].prompts == ["第一问", "第二问"]
+    assert clients[0].options.env["ANTHROPIC_CUSTOM_HEADERS"].splitlines() == [
+        "X-Client: eido",
+        "langfuse_session_id: sess_reuse",
+        "langfuse_trace_user_id: eido-worker",
+    ]
 
 
 def test_execute_stream_resume_falls_back_to_fresh(tmp_path, monkeypatch):

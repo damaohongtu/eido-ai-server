@@ -60,9 +60,7 @@ def _serialize_log_value(value: object) -> str:
         return repr(value)
 
 
-def _log_complete_value(
-    event_name: str, value: object, level: int = logging.INFO
-) -> None:
+def _log_complete_value(event_name: str, value: object) -> None:
     """Log complete Claude SDK content in ordered collector-friendly chunks."""
     content = _serialize_log_value(value)
     chunks = [
@@ -70,8 +68,7 @@ def _log_complete_value(
         for offset in range(0, len(content), CLAUDE_LOG_CHUNK_CHARS)
     ] or [""]
     for index, chunk in enumerate(chunks, start=1):
-        logger.log(
-            level,
+        logger.debug(
             "  [Claude/%s chunk=%d/%d chars=%d] %s",
             event_name,
             index,
@@ -201,7 +198,7 @@ class AgentService:
                 and (session is current or session.turn is None)
                 and session.deleting is None
             ):
-                logger.info("回收空闲常驻客户端: session=%s", key)
+                logger.debug("回收空闲常驻客户端: session=%s", key)
                 await self._drop_client(session)
 
     async def execute_stream(
@@ -211,8 +208,8 @@ class AgentService:
         *,
         session_id: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        logger.info(
-            "▶ execute_stream 开始 | 消息数: %d | session=%s | 上下文字符数: %d",
+        logger.debug(
+            "开始执行 | 消息数: %d | session=%s | 上下文字符数: %d",
             len(messages),
             session_id,
             len(context or ""),
@@ -261,8 +258,6 @@ class AgentService:
         except Exception as exc:
             logger.exception("Claude 执行失败")
             yield self._sse({"type": "error", "message": f"执行失败: {exc}"})
-        finally:
-            logger.info("◀ execute_stream 结束")
 
         yield _DONE_FRAME
 
@@ -310,12 +305,12 @@ class AgentService:
 
         base_url = agent_env.get("ANTHROPIC_BASE_URL")
         provider = urlsplit(base_url).hostname if base_url else "api.anthropic.com"
-        logger.info("  [ClaudeAuth] mode=%s provider=%s", auth_key, provider or "custom")
+        logger.debug("  [ClaudeAuth] mode=%s provider=%s", auth_key, provider or "custom")
         try:
             mcp_config = load_mcp_config(settings.MCP_CONFIG_PATH, environment=agent_env)
         except (ValueError, OSError) as exc:
             raise _AgentRequestError(f"MCP 配置错误: {exc}") from exc
-        logger.info(
+        logger.debug(
             "  [ClaudeMCP] path=%s servers=%s",
             mcp_config.path,
             ",".join(mcp_config.server_names) or "(none)",
@@ -408,41 +403,46 @@ class AgentService:
             **settings.claude_agent_env,
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
         }
+        # LiteLLM 将这两个请求头映射到 Langfuse 的 Session ID 和 User ID。
+        tracing_headers: dict[str, str] = {}
         if session_id:
             env["EIDO_SESSION_ID"] = session_id
-            # CLI 会将其解析为 Anthropic 请求体的 metadata 字段，
-            # 供 litellm 等网关读取并上报 langfuse 做会话追踪
-            env["CLAUDE_CODE_EXTRA_METADATA"] = json.dumps(
-                {"session_id": session_id}, ensure_ascii=False
-            )
+            tracing_headers["langfuse_session_id"] = session_id
+        if settings.EIDO_AGENT_NAME:
+            tracing_headers["langfuse_trace_user_id"] = settings.EIDO_AGENT_NAME
+        if tracing_headers:
+            headers = [
+                line
+                for line in os.environ.get("ANTHROPIC_CUSTOM_HEADERS", "").splitlines()
+                if line.partition(":")[0].strip().lower() not in tracing_headers
+            ]
+            headers.extend(f"{name}: {value}" for name, value in tracing_headers.items())
+            env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(headers)
         return env
 
     def _log_message(self, message: object) -> None:
-        """Write complete SDK messages; no preview/truncation is used in logs."""
-        if isinstance(message, AssistantMessage):
+        debug = logger.isEnabledFor(logging.DEBUG)
+        if debug and isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock):
                     _log_complete_value("Assistant/Text", block.text)
                 elif isinstance(block, ThinkingBlock):
                     _log_complete_value("Assistant/Thinking", block.thinking)
                 elif isinstance(block, ToolUseBlock):
-                    logger.info("  [Claude/Tool/Call] %s", block.name)
+                    logger.debug("  [Claude/Tool/Call] %s", block.name)
                     _log_complete_value(f"Tool/Input:{block.name}", block.input)
 
         elif isinstance(message, UserMessage):
             if isinstance(message.content, list):
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
-                        raw = block.content
-                        content_str = raw if isinstance(raw, str) else str(raw or "")
-                        status = "ERROR" if block.is_error else "OK"
-                        _log_complete_value(
-                            f"Tool/Result:{status}",
-                            content_str,
-                            logging.ERROR if block.is_error else logging.INFO,
-                        )
+                        if block.is_error:
+                            logger.warning("Claude 工具调用失败 | tool_use_id=%s", block.tool_use_id)
+                        if debug:
+                            status = "ERROR" if block.is_error else "OK"
+                            _log_complete_value(f"Tool/Result:{status}", block.content)
 
-        elif isinstance(message, SystemMessage):
+        elif debug and isinstance(message, SystemMessage):
             _log_complete_value(f"System/{message.subtype}", message.data)
 
         elif isinstance(message, ResultMessage):
@@ -566,5 +566,5 @@ def init_agent_service(
 ) -> AgentService:
     global _instance
     _instance = AgentService(skills_dir, workspace_root)
-    logger.info(f"AgentService 初始化完成 - 技能目录: {skills_dir}")
+    logger.debug("AgentService 技能目录: %s", skills_dir)
     return _instance
