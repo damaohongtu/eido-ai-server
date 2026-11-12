@@ -132,6 +132,25 @@ class TestWorkspace:
 
 
 class TestChatValidation:
+    def test_chat_schema_accepts_all_message_roles(self):
+        from app.schemas.chat import ChatRequest
+
+        request = ChatRequest(
+            session_id=_unique_id(),
+            messages=[
+                {"role": "system", "content": "系统规则"},
+                {"role": "user", "content": "问题"},
+                {"role": "assistant", "content": "历史回答"},
+                {"role": "user", "content": "继续"},
+            ],
+        )
+        assert [message.role for message in request.messages] == [
+            "system",
+            "user",
+            "assistant",
+            "user",
+        ]
+
     def test_disconnect_during_send_closes_agent_stream(self, monkeypatch, tmp_path):
         from app.api.v1.endpoints import chat
         from app.schemas.chat import ChatRequest

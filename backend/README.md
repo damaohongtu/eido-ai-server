@@ -89,11 +89,20 @@ python -m pytest ../tests
 {
   "session_id": "a1b2c3d4e5f6",
   "messages": [
+    {"role": "system", "content": "始终使用中文回答"},
     {"role": "user", "content": "@A股财报点评 分析中望软件2024年报"}
   ],
   "context": "（可选）上一步技能的输出，用于多技能流水线"
 }
 ```
+
+首轮的非空 `system` message 会按顺序合并，并通过 Claude Code 原生 system prompt
+传入。同一 `session_id` 后续可重复传入完全相同的 system message或省略；中途变更
+会返回 SSE `error`，需要新建会话。
+
+`messages` 支持 `user`、`assistant`、`system`。冷启动时最后一条 `user` 是当前请求，
+此前的 `user`/`assistant` 用于恢复带角色的历史；已有原生会话时由 Claude Code 自身
+承载历史，避免重复注入。
 
 响应为 SSE 流，事件类型：
 

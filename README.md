@@ -129,6 +129,7 @@ curl -N -X POST http://localhost:8000/api/v1/chat/chat \
   -d "{
     \"session_id\": \"${SESSION_ID}\",
     \"messages\": [
+      {\"role\": \"system\", \"content\": \"始终使用中文回答\"},
       {\"role\": \"user\", \"content\": \"你好，请简要介绍你自己\"}
     ]
   }"
@@ -149,6 +150,14 @@ curl -N -X POST http://localhost:8000/api/v1/chat/chat \
 ```
 
 响应为 SSE（`text/event-stream`），每行形如 `data: {"type":"content",...}`，结束为 `data: [DONE]`。
+
+首轮请求中的非空 `system` message 会按顺序合并，并原生追加到 Claude Code system
+prompt。同一 `session_id` 的后续请求可以重复传入完全相同的 system message，也可以省略；
+为保证原生会话语义一致，中途变更 system message 会返回 SSE `error`，此时应创建新会话。
+
+`messages` 支持 `user`、`assistant`、`system` 三种角色。冷启动时，最后一条 `user`
+作为当前请求，此前的 `user`/`assistant` 作为带角色的历史上下文恢复；正常续轮由 Claude
+Code 原生会话保存历史，不会重复注入调用方再次携带的历史消息。
 
 每个 HTTP 响应都会返回 `X-Trace-Id`。也可以由调用方传入合法的
 `X-Trace-Id` 以串联上游请求。默认日志记录请求结果和 Claude 单轮执行摘要，

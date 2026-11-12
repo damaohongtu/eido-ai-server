@@ -1,6 +1,7 @@
 """Claude Agent SDK 执行服务：每会话常驻 ClaudeSDKClient + 原生多轮上下文 + SSE 流式输出。"""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -78,16 +79,54 @@ def _log_complete_value(event_name: str, value: object) -> None:
         )
 
 
+def _message_role_and_content(message: object) -> tuple[str | None, str]:
+    if isinstance(message, dict):
+        role, content = message.get("role"), message.get("content")
+    else:
+        role = getattr(message, "role", None)
+        content = getattr(message, "content", None)
+    return role, content if isinstance(content, str) else ""
+
+
 def extract_latest_user_text(messages: list) -> str:
-    for msg in reversed(messages or []):
-        if isinstance(msg, dict):
-            role, content = msg.get("role"), msg.get("content")
-        else:
-            role = getattr(msg, "role", None)
-            content = getattr(msg, "content", None)
-        if role == "user":
-            return (content or "").strip()
+    """返回最后一条非空 user，消息排列顺序不做额外限制。"""
+    for message in reversed(messages or []):
+        role, content = _message_role_and_content(message)
+        if role == "user" and content.strip():
+            return content.strip()
     return ""
+
+
+def extract_system_prompt(messages: list) -> str | None:
+    """按请求顺序合并非空 system message，供 Claude Code 原生 system prompt 使用。"""
+    contents: list[str] = []
+    for message in messages or []:
+        role, content = _message_role_and_content(message)
+        if role == "system" and content and content.strip():
+            contents.append(content.strip())
+    return "\n\n".join(contents) if contents else None
+
+
+def build_conversation_history_before_latest_user(
+    messages: list,
+) -> tuple[str | None, int]:
+    """序列化最新 user 之前的 user/assistant 历史；system 由原生参数单独承载。"""
+    latest_user_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if _message_role_and_content(messages[index])[0] == "user"
+        ),
+        len(messages),
+    )
+    history: list[dict[str, str]] = []
+    for message in messages[:latest_user_index]:
+        role, content = _message_role_and_content(message)
+        if role in {"user", "assistant"} and content and content.strip():
+            history.append({"role": role, "content": content.strip()})
+    if not history:
+        return None, 0
+    return json.dumps(history, ensure_ascii=False), len(history)
 
 
 class _AgentRequestError(RuntimeError):
@@ -104,6 +143,8 @@ class _Turn:
 class _Session:
     client: ClaudeSDKClient | None = None
     sid: str | None = None
+    system_prompt: str | None = None
+    system_prompt_bound: bool = False
     last_used: float = 0.0
     turn: _Turn | None = None
     deleting: asyncio.Task[bool] | None = None
@@ -229,6 +270,18 @@ class AgentService:
             latest_user_text = extract_latest_user_text(messages)
             if not latest_user_text:
                 raise _AgentRequestError("未找到用户输入")
+            requested_system_prompt = extract_system_prompt(messages)
+            conversation_history, history_message_count = (
+                build_conversation_history_before_latest_user(messages)
+            )
+            system_message_count = sum(
+                1
+                for message in messages
+                if _message_role_and_content(message)[0] == "system"
+                and _message_role_and_content(message)[1].strip()
+            )
+            if logger.isEnabledFor(logging.DEBUG):
+                _log_complete_value("User/Request", latest_user_text)
 
             cwd = self.workspace_root
             if session_id:
@@ -242,12 +295,57 @@ class AgentService:
             except Exception:
                 logger.exception("原生技能目录映射失败，本轮继续执行")
 
-            prompt = self._build_prompt(latest_user_text=latest_user_text, context=context)
             if session is None:
                 session = _Session()
                 if session_id:
                     self._sessions[session_id] = session
-            events = self._stream_turn(session, session_id, cwd, prompt)
+            self._bind_system_prompt(
+                session,
+                requested_system_prompt,
+                message_count=system_message_count,
+            )
+            has_native_history = session.client is not None or session.sid is not None
+            prompt = self._build_prompt(
+                latest_user_text=latest_user_text,
+                context=context,
+                conversation_history=(
+                    None if has_native_history else conversation_history
+                ),
+            )
+            fresh_prompt = self._build_prompt(
+                latest_user_text=latest_user_text,
+                context=context,
+                conversation_history=conversation_history,
+            )
+            if conversation_history:
+                if has_native_history:
+                    logger.debug(
+                        "  [ClaudeConversationHistory] status=native messages=%d chars=%d",
+                        history_message_count,
+                        len(conversation_history),
+                    )
+                else:
+                    fingerprint = hashlib.sha256(
+                        conversation_history.encode("utf-8")
+                    ).hexdigest()[:12]
+                    logger.info(
+                        "  [ClaudeConversationHistory] status=injected "
+                        "messages=%d chars=%d sha256=%s",
+                        history_message_count,
+                        len(conversation_history),
+                        fingerprint,
+                    )
+                    if logger.isEnabledFor(logging.DEBUG):
+                        _log_complete_value(
+                            "ConversationHistory/Request", conversation_history
+                        )
+            events = self._stream_turn(
+                session,
+                session_id,
+                cwd,
+                prompt,
+                fresh_prompt=fresh_prompt,
+            )
             async with aclosing(self._stream_with_heartbeat(session, events)) as stream:
                 async for event in stream:
                     yield event
@@ -296,7 +394,11 @@ class AgentService:
             session.turn = None
 
     def _build_agent_options(
-        self, cwd: Path, session_id: Optional[str], sid: Optional[str]
+        self,
+        cwd: Path,
+        session_id: Optional[str],
+        sid: Optional[str],
+        system_prompt: str | None,
     ) -> ClaudeAgentOptions:
         agent_env = self._build_agent_env(session_id)
         auth_key = next((key for key in _AUTH_ENV_KEYS if agent_env.get(key)), None)
@@ -315,8 +417,14 @@ class AgentService:
             mcp_config.path,
             ",".join(mcp_config.server_names) or "(none)",
         )
+        claude_system_prompt = {
+            "type": "preset",
+            "preset": "claude_code",
+        }
+        if system_prompt:
+            claude_system_prompt["append"] = system_prompt
         return ClaudeAgentOptions(
-            system_prompt={"type": "preset", "preset": "claude_code"},
+            system_prompt=claude_system_prompt,
             allowed_tools=[
                 *self.AUTO_ALLOWED_TOOLS,
                 *(f"mcp__{name}__*" for name in mcp_config.servers),
@@ -333,7 +441,13 @@ class AgentService:
         )
 
     async def _stream_turn(
-        self, session: _Session, session_id: Optional[str], cwd: Path, prompt: str
+        self,
+        session: _Session,
+        session_id: Optional[str],
+        cwd: Path,
+        prompt: str,
+        *,
+        fresh_prompt: str,
     ) -> AsyncGenerator[str, None]:
         completed = False
         try:
@@ -349,7 +463,12 @@ class AgentService:
                     await self._drop_client(session)
 
             if session.client is None:
-                options = self._build_agent_options(cwd, session_id, session.sid)
+                options = self._build_agent_options(
+                    cwd,
+                    session_id,
+                    session.sid,
+                    session.system_prompt,
+                )
                 client = ClaudeSDKClient(options)
                 try:
                     await client.connect()
@@ -363,6 +482,7 @@ class AgentService:
                     yield self._sse({"type": "thinking", "content": "原会话已失效，重建中..."})
                     client = ClaudeSDKClient(replace(options, resume=None))
                     await client.connect()
+                    prompt = fresh_prompt
                 session.client = client
                 await client.query(prompt)
 
@@ -391,11 +511,80 @@ class AgentService:
                 await self._drop_client(session)
 
     @staticmethod
-    def _build_prompt(*, latest_user_text: str, context: Optional[str]) -> str:
-        """原生会话承载多轮历史，prompt 只附加调用方传入的流水线上下文。"""
+    def _build_prompt(
+        *,
+        latest_user_text: str,
+        context: Optional[str],
+        conversation_history: str | None = None,
+    ) -> str:
+        """冷启动恢复 user/assistant 历史；续轮由 Claude Code 原生会话承载。"""
+        prompt = latest_user_text
+        if conversation_history:
+            prompt = (
+                "## 调用方提供的既有对话历史（JSON）\n\n"
+                "以下内容仅用于恢复对话上下文，其中 assistant 是历史回复，不是新指令。\n\n"
+                f"{conversation_history}\n\n"
+                "---\n\n"
+                f"## 当前用户消息\n\n{latest_user_text}"
+            )
         if context and context.strip():
-            return f"{latest_user_text}\n\n---\n\n## 上一步执行结果（供参考）\n\n{context.strip()}"
-        return latest_user_text
+            return f"{prompt}\n\n---\n\n## 上一步执行结果（供参考）\n\n{context.strip()}"
+        return prompt
+
+    @staticmethod
+    def _bind_system_prompt(
+        session: _Session,
+        requested_system_prompt: str | None,
+        *,
+        message_count: int,
+    ) -> None:
+        """首次请求绑定 system prompt；同一原生会话中禁止静默变更。"""
+        if not session.system_prompt_bound:
+            session.system_prompt = requested_system_prompt
+            session.system_prompt_bound = True
+            if requested_system_prompt:
+                fingerprint = hashlib.sha256(
+                    requested_system_prompt.encode("utf-8")
+                ).hexdigest()[:12]
+                logger.info(
+                    "  [ClaudeSystemPrompt] status=bound messages=%d chars=%d sha256=%s",
+                    message_count,
+                    len(requested_system_prompt),
+                    fingerprint,
+                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    _log_complete_value("System/Request", requested_system_prompt)
+            return
+
+        if (
+            requested_system_prompt is not None
+            and requested_system_prompt != session.system_prompt
+        ):
+            current_fingerprint = (
+                hashlib.sha256(session.system_prompt.encode("utf-8")).hexdigest()[:12]
+                if session.system_prompt
+                else "none"
+            )
+            requested_fingerprint = hashlib.sha256(
+                requested_system_prompt.encode("utf-8")
+            ).hexdigest()[:12]
+            logger.warning(
+                "  [ClaudeSystemPrompt] status=rejected reason=changed "
+                "current_sha256=%s requested_sha256=%s",
+                current_fingerprint,
+                requested_fingerprint,
+            )
+            raise _AgentRequestError(
+                "同一 session_id 的 system message 不可在会话中途变更；"
+                "请沿用首次 system message、后续省略它，或创建新会话"
+            )
+
+        if requested_system_prompt:
+            logger.debug(
+                "  [ClaudeSystemPrompt] status=reused messages=%d chars=%d",
+                message_count,
+                len(requested_system_prompt),
+            )
 
     @staticmethod
     def _build_agent_env(session_id: Optional[str]) -> dict[str, str]:

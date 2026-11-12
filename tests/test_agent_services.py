@@ -28,7 +28,9 @@ from app.core.config import settings
 from app.core.mcp_config import load_mcp_config
 from app.services.agent_service import (
     AgentService,
+    build_conversation_history_before_latest_user,
     extract_latest_user_text,
+    extract_system_prompt,
 )
 from app.services.session_workspace import SessionWorkspaceManager
 
@@ -151,6 +153,51 @@ def test_extract_latest_user_text():
         {"role": "user", "content": "  第二问  "},
     ]
     assert extract_latest_user_text(msgs) == "第二问"
+    assert extract_latest_user_text(
+        [
+            {"role": "user", "content": "问题"},
+            {"role": "assistant", "content": "已有回答"},
+        ]
+    ) == "问题"
+    assert (
+        extract_latest_user_text(
+            [
+                {"role": "user", "content": "有效问题"},
+                {"role": "assistant", "content": "已有回答"},
+                {"role": "user", "content": ""},
+            ]
+        )
+        == "有效问题"
+    )
+
+
+def test_extract_system_prompt_preserves_order_and_ignores_empty():
+    msgs = [
+        {"role": "system", "content": "  第一条规则  "},
+        {"role": "user", "content": "问题"},
+        {"role": "system", "content": ""},
+        {"role": "system", "content": "第二条规则"},
+    ]
+    assert extract_system_prompt(msgs) == "第一条规则\n\n第二条规则"
+    assert extract_system_prompt([{"role": "user", "content": "问题"}]) is None
+
+
+def test_build_conversation_history_supports_user_and_assistant():
+    history, count = build_conversation_history_before_latest_user(
+        [
+            {"role": "system", "content": "系统规则"},
+            {"role": "user", "content": "第一问"},
+            {"role": "assistant", "content": "第一答"},
+            {"role": "user", "content": "第二问"},
+        ]
+    )
+    assert count == 2
+    assert json.loads(history) == [
+        {"role": "user", "content": "第一问"},
+        {"role": "assistant", "content": "第一答"},
+    ]
+    assert "系统规则" not in history
+    assert "第二问" not in history
 
 
 def test_build_prompt_passthrough_with_context(tmp_path):
@@ -170,6 +217,16 @@ def test_build_prompt_passthrough_with_context(tmp_path):
         latest_user_text="q", context=long_context
     )
     assert "x" * 9000 in untruncated
+
+    with_history = service._build_prompt(
+        latest_user_text="第二问",
+        context=None,
+        conversation_history='[{"role":"user","content":"第一问"},'
+        '{"role":"assistant","content":"第一答"}]',
+    )
+    assert "既有对话历史" in with_history
+    assert '"role":"assistant"' in with_history
+    assert with_history.endswith("第二问")
 
 
 def test_claude_sdk_logging_keeps_complete_content_at_debug(tmp_path, caplog):
@@ -334,6 +391,187 @@ def test_execute_stream_success_flow(tmp_path, monkeypatch):
     assert service._sessions["sess_ok"].turn is None
 
 
+def test_execute_stream_binds_request_system_prompt(tmp_path, monkeypatch, caplog):
+    service = _make_service(tmp_path, monkeypatch)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [{"turns": [[_result(session_id="cs_system")]]}],
+    )
+    system_prompt = "你是财报分析助手。\n\n输出必须包含风险提示。"
+
+    with caplog.at_level(logging.DEBUG, logger="app.services.agent_service"):
+        events = asyncio.run(
+            _collect(
+                service.execute_stream(
+                    [
+                        {"role": "system", "content": "你是财报分析助手。"},
+                        {"role": "system", "content": "输出必须包含风险提示。"},
+                        {"role": "user", "content": "分析年报"},
+                    ],
+                    session_id="sess_system",
+                )
+            )
+        )
+
+    assert _payload(events[-2])["type"] == "workflow_complete"
+    assert clients[0].prompts == ["分析年报"]
+    assert clients[0].options.system_prompt == {
+        "type": "preset",
+        "preset": "claude_code",
+        "append": system_prompt,
+    }
+    session = service._sessions["sess_system"]
+    assert session.system_prompt_bound
+    assert session.system_prompt == system_prompt
+    log_messages = [record.getMessage() for record in caplog.records]
+    assert any("[ClaudeSystemPrompt] status=bound" in item for item in log_messages)
+    assert any(
+        "[Claude/System/Request chunk=" in item
+        and "你是财报分析助手。" in item
+        and "输出必须包含风险提示。" in item
+        for item in log_messages
+    )
+
+
+def test_execute_stream_restores_all_roles_on_cold_start(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [{"turns": [[_result(session_id="cs_all_roles")]]}],
+    )
+
+    events = asyncio.run(
+        _collect(
+            service.execute_stream(
+                [
+                    {"role": "system", "content": "始终用中文回答"},
+                    {"role": "user", "content": "第一问"},
+                    {"role": "assistant", "content": "第一答"},
+                    {"role": "user", "content": "第二问"},
+                ],
+                session_id="sess_all_roles",
+            )
+        )
+    )
+
+    assert _payload(events[-2])["type"] == "workflow_complete"
+    assert clients[0].options.system_prompt["append"] == "始终用中文回答"
+    sent_prompt = clients[0].prompts[0]
+    assert '"role": "user", "content": "第一问"' in sent_prompt
+    assert '"role": "assistant", "content": "第一答"' in sent_prompt
+    assert sent_prompt.endswith("第二问")
+
+
+def test_execute_stream_does_not_duplicate_request_history_on_native_turn(
+    tmp_path, monkeypatch
+):
+    service = _make_service(tmp_path, monkeypatch)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [
+            {
+                "turns": [
+                    [_result(session_id="cs_native_history")],
+                    [_result(session_id="cs_native_history")],
+                ]
+            }
+        ],
+    )
+
+    asyncio.run(
+        _collect(
+            service.execute_stream(
+                [{"role": "user", "content": "第一问"}],
+                session_id="sess_native_history",
+            )
+        )
+    )
+    events = asyncio.run(
+        _collect(
+            service.execute_stream(
+                [
+                    {"role": "user", "content": "第一问"},
+                    {"role": "assistant", "content": "第一答"},
+                    {"role": "user", "content": "第二问"},
+                ],
+                session_id="sess_native_history",
+            )
+        )
+    )
+
+    assert _payload(events[-2])["type"] == "workflow_complete"
+    assert clients[0].prompts == ["第一问", "第二问"]
+
+
+def test_execute_stream_reuses_or_omits_same_system_prompt(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [
+            {
+                "turns": [
+                    [_result(session_id="cs_system_reuse")],
+                    [_result(session_id="cs_system_reuse")],
+                    [_result(session_id="cs_system_reuse")],
+                ]
+            }
+        ],
+    )
+    system_message = {"role": "system", "content": "始终使用中文"}
+
+    for messages in (
+        [system_message, {"role": "user", "content": "第一问"}],
+        [system_message, {"role": "user", "content": "第二问"}],
+        [{"role": "user", "content": "第三问"}],
+    ):
+        events = asyncio.run(
+            _collect(service.execute_stream(messages, session_id="sess_system_reuse"))
+        )
+        assert _payload(events[-2])["type"] == "workflow_complete"
+
+    assert len(clients) == 1
+    assert clients[0].prompts == ["第一问", "第二问", "第三问"]
+    assert clients[0].options.system_prompt["append"] == "始终使用中文"
+
+
+def test_execute_stream_rejects_changed_system_prompt(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    clients = _install_fake_clients(
+        monkeypatch,
+        [{"turns": [[_result(session_id="cs_system_fixed")]]}],
+    )
+
+    first = asyncio.run(
+        _collect(
+            service.execute_stream(
+                [
+                    {"role": "system", "content": "规则 A"},
+                    {"role": "user", "content": "第一问"},
+                ],
+                session_id="sess_system_fixed",
+            )
+        )
+    )
+    changed = asyncio.run(
+        _collect(
+            service.execute_stream(
+                [
+                    {"role": "system", "content": "规则 B"},
+                    {"role": "user", "content": "第二问"},
+                ],
+                session_id="sess_system_fixed",
+            )
+        )
+    )
+
+    assert _payload(first[-2])["type"] == "workflow_complete"
+    assert _payload(changed[-2])["type"] == "error"
+    assert "system message 不可" in _payload(changed[-2])["message"]
+    assert changed[-1] == "data: [DONE]\n\n"
+    assert clients[0].prompts == ["第一问"]
+    assert service._sessions["sess_system_fixed"].client is clients[0]
+
+
 def test_execute_stream_reuses_client_on_second_turn(tmp_path, monkeypatch):
     service = _make_service(tmp_path, monkeypatch)
     monkeypatch.setattr(settings, "EIDO_AGENT_NAME", "eido-worker")
@@ -411,7 +649,11 @@ def test_execute_stream_resume_falls_back_to_fresh(tmp_path, monkeypatch):
     events = asyncio.run(
         _collect(
             service.execute_stream(
-                [{"role": "user", "content": "继续"}],
+                [
+                    {"role": "user", "content": "旧问题"},
+                    {"role": "assistant", "content": "旧回答"},
+                    {"role": "user", "content": "继续"},
+                ],
                 session_id="sess_resume",
             )
         )
@@ -423,6 +665,8 @@ def test_execute_stream_resume_falls_back_to_fresh(tmp_path, monkeypatch):
     assert payloads[-1]["type"] == "workflow_complete"
     assert service._sessions["sess_resume"].sid == "cs_new"
     assert service._sessions["sess_resume"].client is clients[1]
+    assert '"role": "assistant", "content": "旧回答"' in clients[1].prompts[0]
+    assert clients[1].prompts[0].endswith("继续")
 
 
 def test_execute_stream_recovers_dead_client_with_resume(tmp_path, monkeypatch):
